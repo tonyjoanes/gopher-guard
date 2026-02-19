@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jokeservice
+  namespace: demo
+  labels:
+    app: jokeservice
+    managed-by: gopherguard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jokeservice
+  template:
+    metadata:
+      labels:
+        app: jokeservice
+    spec:
+      containers:
+        - name: jokeservice
+          # Replace with your own registry image after: docker build + push
+          image: ghcr.io/tonyjoanes/jokeservice:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: ERROR_RATE
+              value: "0.20"   # 20% of requests return HTTP 500
+            - name: PANIC_RATE
+              value: "0.05"   # 5%  of requests crash the process → CrashLoopBackOff
+            - name: OOM_RATE
+              value: "0.02"   # 2%  of requests simulate OOM
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"   # intentionally tight so OOM sim actually triggers
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5

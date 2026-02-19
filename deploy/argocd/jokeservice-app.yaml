@@ -1,0 +1,34 @@
+# ArgoCD Application — syncs the JokeService from Git into the demo namespace.
+#
+# Prerequisites:
+#   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+#
+# Then apply this file:
+#   kubectl apply -f deploy/argocd/jokeservice-app.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jokeservice
+  namespace: argocd
+  # Finalizer ensures ArgoCD cleans up managed resources when the Application is deleted.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # TODO: replace with your fork URL
+    repoURL: https://github.com/tonyjoanes/gopher-guard
+    targetRevision: main
+    path: deploy/jokeservice
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+
+  syncPolicy:
+    automated:
+      prune: true      # remove resources deleted from Git
+      selfHeal: true   # re-apply if someone manually edits the cluster
+    syncOptions:
+      - CreateNamespace=true

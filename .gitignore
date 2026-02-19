@@ -24,6 +24,13 @@ profile.cov
 go.work
 go.work.sum
 
+# Kubebuilder downloaded tool binaries
+bin/
+
+# Built output binaries (jokeservice, manager, etc.)
+jokeservice
+manager
+
 # env file
 .env
 

@@ -19,31 +19,25 @@
 - [ ] Confirm GitOps controller is syncing the repo
 
 ### 1.3 JokeService demo app
-- [ ] Write a minimal Go HTTP server (`cmd/jokeservice/main.go`) that:
+- [x] Write a minimal Go HTTP server (`cmd/jokeservice/main.go`) that:
   - Randomly returns HTTP 500 (`~20% of requests`)
   - Randomly panics / OOMs to simulate a crash loop
-- [ ] Write `Dockerfile` for JokeService
-- [ ] Write Kubernetes manifests: `Deployment`, `Service` under `deploy/jokeservice/`
-- [ ] Add ArgoCD `Application` (or Flux `Kustomization`) YAML to sync JokeService from Git
-- [ ] Deploy JokeService via GitOps and confirm crash-looping
+- [x] Write `Dockerfile` for JokeService (`deploy/jokeservice/Dockerfile`)
+- [x] Write Kubernetes manifests: `Deployment`, `Service` under `deploy/jokeservice/`
+- [x] Add ArgoCD `Application` YAML to sync JokeService from Git (`deploy/argocd/jokeservice-app.yaml`)
+- [ ] **[YOU]** Build & push image: `docker build -f deploy/jokeservice/Dockerfile -t ghcr.io/<you>/jokeservice:latest . && docker push`
+- [ ] **[YOU]** Deploy JokeService via GitOps: `kubectl apply -f deploy/argocd/jokeservice-app.yaml`
+- [ ] **[YOU]** Confirm crash-looping: `kubectl get pods -n demo -w`
 
 ### 1.4 Operator skeleton (Kubebuilder)
-- [ ] Run `kubebuilder init --domain gopherguard.dev --repo github.com/<you>/gopher-guard`
-- [ ] Run `kubebuilder create api --group ops --version v1alpha1 --kind AegisWatch`
-- [ ] Define `AegisWatchSpec` fields:
-  - `targetRef` (name/namespace of Deployment to watch)
-  - `llmProvider` (groq | ollama | openai)
-  - `llmModel` (e.g. `llama3-70b-8192`)
-  - `gitRepo` (owner/repo for PRs)
-  - `safeMode` (bool — suggest only, no auto-PR)
-- [ ] Define `AegisWatchStatus` fields:
-  - `phase` (Watching | Degraded | Healing | Healthy)
-  - `lastDiagnosis` (string)
-  - `lastPRUrl` (string)
-  - `healingScore` (int)
-- [ ] `make generate && make manifests` — generate CRD YAML
-- [ ] Write basic reconciler stub that logs "I see you, JokeService" on CR creation
-- [ ] `make install && make run` — confirm operator reacts to `AegisWatch` CR
+- [x] Run `kubebuilder init --domain gopherguard.dev --repo github.com/tonyjoanes/gopher-guard`
+- [x] Run `kubebuilder create api --group ops --version v1alpha1 --kind AegisWatch`
+- [x] Define `AegisWatchSpec` fields (targetRef, llmProvider, llmModel, gitRepo, safeMode, restartThreshold)
+- [x] Define `AegisWatchStatus` fields (phase, lastDiagnosis, lastPRUrl, healingScore, lastAnomalyTime, conditions)
+- [x] `make generate && make manifests` — CRD YAML generated
+- [x] Write reconciler with anomaly detection (CrashLoopBackOff, OOMKilled, restart threshold, unavailable replicas)
+- [ ] **[YOU]** `make install` — install CRDs into your kind cluster
+- [ ] **[YOU]** `make run` — run the operator locally and apply `config/samples/ops_v1alpha1_aegiswatch.yaml`
 
 **Milestone 1**: Operator prints event in real-time when CR appears. ✓
 
