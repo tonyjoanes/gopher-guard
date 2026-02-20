@@ -24,13 +24,20 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	opsv1alpha1 "github.com/tonyjoanes/gopher-guard/api/v1alpha1"
+	"github.com/tonyjoanes/gopher-guard/internal/observability"
 )
 
 const requeueInterval = 30 * time.Second
@@ -38,7 +45,9 @@ const requeueInterval = 30 * time.Second
 // AegisWatchReconciler reconciles an AegisWatch object.
 type AegisWatchReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme    *runtime.Scheme
+	Recorder  record.EventRecorder
+	Collector *observability.Collector
 }
 
 // +kubebuilder:rbac:groups=ops.gopherguard.dev,resources=aegiswatches,verbs=get;list;watch;create;update;patch;delete
@@ -50,13 +59,18 @@ type AegisWatchReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
-// Reconcile is the main control loop. It:
-//  1. Fetches the AegisWatch CR.
-//  2. Looks up the target Deployment.
-//  3. Scans pods for anomalies (CrashLoopBackOff, OOMKilled, excessive restarts).
-//  4. Transitions .status.phase accordingly.
+// Reconcile is the main control loop.
 //
-// Phase 2+ will add LLM diagnosis and GitHub PR creation.
+//  1. Fetch the AegisWatch CR.
+//  2. Resolve and fetch the target Deployment.
+//  3. Scan pods for anomalies (CrashLoopBackOff, OOMKilled, excessive restarts,
+//     unavailable replicas).
+//  4. On anomaly: collect full ObservabilityContext (logs + events + metrics),
+//     emit a Kubernetes Event on the CR, update .status.phase = Degraded,
+//     record lastAnomalyTime.
+//  5. On healthy: update .status.phase = Healthy.
+//
+// Phase 3 will call the LLM with the ObservabilityContext.
 func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -87,26 +101,50 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, deployKey, &deployment); err != nil {
 		if apierrors.IsNotFound(err) {
 			logger.Info("Target Deployment not found — will retry", "deployment", deployKey)
+			r.Recorder.Event(&watch, corev1.EventTypeWarning, "DeploymentNotFound",
+				fmt.Sprintf("Deployment %s not found in namespace %s", deployKey.Name, deployKey.Namespace))
 			return ctrl.Result{RequeueAfter: requeueInterval}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching Deployment %s: %w", deployKey, err)
 	}
 
-	// --- 4. Scan pods for anomalies ---
-	anomaly, reason, err := r.detectAnomaly(ctx, &deployment, watch.Spec.RestartThreshold)
+	// --- 4. Detect anomaly ---
+	threshold := watch.Spec.RestartThreshold
+	if threshold == 0 {
+		threshold = 3 // spec default may not be applied yet on brand-new objects
+	}
+	anomaly, reason, err := detectAnomaly(ctx, r.Client, &deployment, threshold)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("detecting anomaly: %w", err)
 	}
 
-	// --- 5. Update status phase ---
+	// --- 5. Collect observability data and update status ---
 	patch := client.MergeFrom(watch.DeepCopy())
+
 	if anomaly {
 		logger.Info("🚨 Houston, we have a problem!",
 			"deployment", deployKey,
 			"reason", reason,
 		)
+
+		// Emit a Kubernetes Warning event on the AegisWatch CR.
+		r.Recorder.Event(&watch, corev1.EventTypeWarning, "AnomalyDetected", reason)
+
+		// Collect full observability context (logs + events + metrics).
+		obs, err := r.Collector.Collect(ctx, &deployment, reason)
+		if err != nil {
+			// Non-fatal: log and continue — we still update the phase.
+			logger.Error(err, "failed to collect observability context")
+		} else {
+			logger.Info(obs.Summary())
+			// Phase 3 hook: pass obs to LLM here.
+			_ = obs
+		}
+
+		now := metav1.Now()
 		watch.Status.Phase = opsv1alpha1.PhaseDegraded
-		// Phase 3: call LLM here → open PR (Phase 4).
+		watch.Status.LastAnomalyTime = &now
+
 	} else {
 		watch.Status.Phase = opsv1alpha1.PhaseHealthy
 	}
@@ -120,8 +158,9 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // detectAnomaly scans pods belonging to the Deployment for known failure conditions.
 // Returns (true, reason, nil) when an anomaly is found.
-func (r *AegisWatchReconciler) detectAnomaly(
+func detectAnomaly(
 	ctx context.Context,
+	c client.Client,
 	deployment *appsv1.Deployment,
 	restartThreshold int32,
 ) (bool, string, error) {
@@ -131,7 +170,7 @@ func (r *AegisWatchReconciler) detectAnomaly(
 	}
 
 	var podList corev1.PodList
-	if err := r.List(ctx, &podList,
+	if err := c.List(ctx, &podList,
 		client.InNamespace(deployment.Namespace),
 		client.MatchingLabels(selector),
 	); err != nil {
@@ -184,9 +223,49 @@ func selectorFromDeployment(d *appsv1.Deployment) (map[string]string, error) {
 }
 
 // SetupWithManager wires the reconciler into the controller-runtime manager.
+// It watches:
+//   - AegisWatch CRs (primary)
+//   - Pods: re-enqueues every AegisWatch whose target namespace matches the pod's
+//     namespace, so the controller reacts immediately to pod restarts/crashes.
 func (r *AegisWatchReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// podToAegisWatches maps a Pod event to the AegisWatch CRs that monitor it.
+	podToAegisWatches := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok {
+			return nil
+		}
+
+		var watchList opsv1alpha1.AegisWatchList
+		if err := r.List(ctx, &watchList); err != nil {
+			return nil
+		}
+
+		var requests []reconcile.Request
+		for _, aw := range watchList.Items {
+			targetNS := aw.Spec.TargetRef.Namespace
+			if targetNS == "" {
+				targetNS = aw.Namespace
+			}
+			if targetNS == pod.Namespace {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Namespace: aw.Namespace,
+						Name:      aw.Name,
+					},
+				})
+			}
+		}
+		return requests
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&opsv1alpha1.AegisWatch{}).
+		// Re-reconcile when any Pod in a watched namespace changes state.
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(podToAegisWatches),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Named("aegiswatch").
 		Complete(r)
 }

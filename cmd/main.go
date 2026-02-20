@@ -28,6 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -39,6 +40,7 @@ import (
 
 	opsv1alpha1 "github.com/tonyjoanes/gopher-guard/api/v1alpha1"
 	"github.com/tonyjoanes/gopher-guard/internal/controller"
+	"github.com/tonyjoanes/gopher-guard/internal/observability"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -63,6 +65,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var prometheusURL string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -81,6 +84,8 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&prometheusURL, "prometheus-url", "",
+		"Base URL of the Prometheus server used for workload metrics (e.g. http://prometheus-operated.monitoring.svc:9090). Leave empty to disable.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -202,9 +207,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build the raw Kubernetes clientset for pod log streaming.
+	kubeClient, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes clientset")
+		os.Exit(1)
+	}
+
+	// Build the observability collector.
+	obsCollector := &observability.Collector{
+		CtrlClient: mgr.GetClient(),
+		KubeClient: kubeClient,
+		Prometheus: observability.NewPrometheusClient(prometheusURL),
+	}
+
 	if err = (&controller.AegisWatchReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("aegiswatch-controller"),
+		Collector: obsCollector,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AegisWatch")
 		os.Exit(1)

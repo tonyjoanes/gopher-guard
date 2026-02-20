@@ -46,25 +46,26 @@
 ## Phase 2 — Kubernetes Observability
 
 ### 2.1 Watch Pods & Deployments
-- [ ] Add lister/watcher for `Pods` and `Deployments` in reconciler using `controller-runtime` client
-- [ ] Detect unhealthy conditions:
-  - `CrashLoopBackOff`
-  - `OOMKilled`
-  - Repeated restarts (restart count > threshold, e.g. 3)
-  - Deployment unavailable replicas > 0 for > N seconds
-- [ ] Emit Kubernetes `Event` on the `AegisWatch` CR when anomaly detected
-- [ ] Update `AegisWatchStatus.phase` to `Degraded`
+- [x] Add `Watches(&corev1.Pod{}, ...)` in `SetupWithManager` — pod changes trigger reconcile
+- [x] Detect unhealthy conditions:
+  - `CrashLoopBackOff` (waiting state)
+  - `OOMKilled` (waiting + last-terminated state)
+  - Repeated restarts (restart count ≥ threshold)
+  - Deployment `unavailableReplicas > 0`
+- [x] Emit Kubernetes `Warning` Event on the `AegisWatch` CR when anomaly detected
+- [x] Update `AegisWatchStatus.phase` to `Degraded`; record `lastAnomalyTime`
 
 ### 2.2 Log & event collection
-- [ ] Fetch last N lines of logs from the crashing container via `core/v1` client (`PodLogOptions`)
-- [ ] Fetch recent Kubernetes events for the Deployment namespace (`EventList`)
-- [ ] Package logs + events into a structured `ObservabilityContext` Go struct
+- [x] Fetch last 50 lines of logs per container via raw `kubernetes.Clientset` (`PodLogOptions`) — with previous-container fallback (`internal/observability/logs.go`)
+- [x] Fetch recent Kubernetes Warning events for the Deployment namespace, filtered by involved object names (`internal/observability/events.go`)
+- [x] Package logs + events into structured `ObservabilityContext` Go struct (`internal/observability/context.go`)
+- [x] `Collector.Collect()` orchestrates all sources into one context (`internal/observability/collector.go`)
 
-### 2.3 Prometheus metrics (optional but recommended)
-- [ ] Add `prometheus/client_golang` dependency
-- [ ] Query Prometheus for CPU/memory usage of the target pod (via HTTP API)
-- [ ] Attach metrics snapshot to `ObservabilityContext`
-- [ ] Expose operator's own metrics endpoint (`/metrics`) via `controller-runtime`
+### 2.3 Prometheus metrics
+- [x] Prometheus HTTP query client (`internal/observability/prometheus.go`) — queries CPU (millicores) and memory (MiB) via instant query API
+- [x] Metrics snapshot attached to `ObservabilityContext.Metrics`
+- [x] Disabled gracefully when `--prometheus-url` flag is empty
+- [x] Operator's own `/metrics` endpoint exposed via `controller-runtime` (kubebuilder default)
 
 **Milestone 2**: Operator prints "Houston, we have a crashing pod" with full logs + event context. ✓
 
@@ -196,8 +197,8 @@
 
 | Phase | Status |
 |-------|--------|
-| 1 — Foundation | ⬜ Not started |
-| 2 — Observability | ⬜ Not started |
+| 1 — Foundation | ✅ Done |
+| 2 — Observability | ✅ Done |
 | 3 — LLM Integration | ⬜ Not started |
 | 4 — GitOps Loop / Auto-PR | ⬜ Not started |
 | 5 — Self-managed via GitOps | ⬜ Not started |
