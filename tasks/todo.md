@@ -100,24 +100,26 @@
 ## Phase 4 — GitOps Loop (Auto-PR)
 
 ### 4.1 GitHub PR creation
-- [ ] Add `github.com/google/go-github/v62` dependency
-- [ ] Implement `GitHubPRClient`:
-  - Clone/read current file from repo via GitHub API (avoid full git clone)
-  - Apply YAML patch (merge strategy: strategic merge or JSON patch)
-  - Create branch `gopherguard/fix-<resource>-<timestamp>`
-  - Commit patched file
-  - Open PR with title: "fix(<resource>): AI-suggested remediation" and body including `WittyLine` + `RootCause`
-- [ ] Store PR URL in `AegisWatchStatus.lastPRUrl`
-- [ ] Guard behind `AegisWatchSpec.safeMode` flag (log-only when `true`)
+- [x] Add `github.com/google/go-github/v62` dependency
+- [x] `GitHubPRClient` (`internal/github/client.go`):
+  - Searches conventional paths (`deploy/<name>/deployment.yaml`, `manifests/<name>.yaml`, etc.)
+  - Reads file via GitHub Contents API (no git clone needed)
+  - `ApplyYAMLPatch()` — strategic merge patch via `k8s.io/apimachinery/pkg/util/strategicpatch` (`internal/github/patch.go`)
+  - Creates branch `gopherguard/fix-<deployment>-<unix-ts>`
+  - Commits patched file with structured message
+  - Opens PR: title `fix(<deployment>): AI-suggested remediation [GopherGuard #N]`, body with root cause + YAML diff + witty line
+- [x] `lastPRUrl` stored in `AegisWatchStatus` after each successful PR
+- [x] `safeMode: true` skips PR entirely — logs diagnosis only
 
-### 4.2 Slack/Discord webhook (optional)
-- [ ] Write `NotificationClient` with a `SendHealingUpdate(Diagnosis, PRUrl)` method
-- [ ] Format message with emoji, witty line, and PR link
-- [ ] Read webhook URL from Kubernetes `Secret` (never hardcode)
+### 4.2 Slack/Discord webhook
+- [x] `NotificationClient` (`internal/notify/webhook.go`) — auto-detects Slack vs Discord from URL
+- [x] Slack: Block Kit payload with header, details, PR link sections
+- [x] Discord: Embed with colour (green=success, yellow=safeMode), fields, footer
+- [x] Webhook URL read from optional `"webhookUrl"` key in the `gitSecretRef` Secret (zero config when absent)
 
 ### 4.3 Healing score
-- [ ] Increment `AegisWatchStatus.healingScore` after each successful PR
-- [ ] Reset or flag when pod stays crashlooping after N PRs (avoid infinite loop)
+- [x] `healingScore` incremented in status after each successful PR creation
+- [x] Anti-loop guard: `MaxHealingAttempts = 5` — if score ≥ cap, emits `HealingCapReached` Warning Event and skips LLM/PR; requires manual intervention
 
 **Milestone 4**: Trigger chaos → PR appears automatically in GitHub → merge → ArgoCD/Flux applies fix → pod healthy. Record the 60-second demo. ✓
 
@@ -189,7 +191,7 @@
 | 1 — Foundation | ✅ Done |
 | 2 — Observability | ✅ Done |
 | 3 — LLM Integration | ✅ Done |
-| 4 — GitOps Loop / Auto-PR | ⬜ Not started |
+| 4 — GitOps Loop / Auto-PR | ✅ Done |
 | 5 — Self-managed via GitOps | ⬜ Not started |
 | 6 — HTMX Dashboard | ⬜ Not started |
 | 7 — Polish & Extensions | ⬜ Not started |

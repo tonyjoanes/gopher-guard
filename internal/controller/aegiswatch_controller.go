@@ -37,13 +37,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	opsv1alpha1 "github.com/tonyjoanes/gopher-guard/api/v1alpha1"
+	ggithub "github.com/tonyjoanes/gopher-guard/internal/github"
 	"github.com/tonyjoanes/gopher-guard/internal/llm"
+	"github.com/tonyjoanes/gopher-guard/internal/notify"
 	"github.com/tonyjoanes/gopher-guard/internal/observability"
 )
 
 const requeueInterval = 30 * time.Second
 
-// gopherArt is printed to stdout whenever GopherGuard delivers an AI diagnosis.
+// gopherArt is printed whenever GopherGuard delivers an AI diagnosis.
 const gopherArt = `
     /\_____/\
    /  o   o  \   G O P H E R G U A R D
@@ -73,21 +75,20 @@ type AegisWatchReconciler struct {
 
 // Reconcile is the main control loop.
 //
-//  1. Fetch the AegisWatch CR.
-//  2. Resolve and fetch the target Deployment.
-//  3. Scan pods for anomalies (CrashLoopBackOff, OOMKilled, excessive restarts,
-//     unavailable replicas).
-//  4. On anomaly:
-//     a. Collect ObservabilityContext (logs + events + metrics).
-//     b. Set phase = Healing, patch status.
-//     c. Build LLM client from spec, call Diagnose.
-//     d. Store root cause + witty line in lastDiagnosis.
-//     e. Emit K8s Event on the CR. Log gopher art + diagnosis.
-//  5. On healthy: set phase = Healthy.
+//  1. Fetch AegisWatch CR + resolve target Deployment.
+//  2. Detect anomaly (CrashLoopBackOff / OOMKilled / restarts / unavailable).
+//  3. On anomaly:
+//     a. Collect ObservabilityContext.
+//     b. Set phase = Healing.
+//     c. Call LLM → Diagnosis.
+//     d. If !safeMode && patch != "" && healingScore < max: open GitHub PR.
+//     e. Increment healingScore, store lastDiagnosis + lastPRUrl in status.
+//     f. Send Slack/Discord notification.
+//  4. On healthy: set phase = Healthy.
 func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// --- 1. Fetch the AegisWatch CR ---
+	// --- 1. Fetch AegisWatch CR ---
 	var watch opsv1alpha1.AegisWatch
 	if err := r.Get(ctx, req.NamespacedName, &watch); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -102,13 +103,12 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"phase", watch.Status.Phase,
 	)
 
-	// --- 2. Resolve target namespace ---
+	// --- 2. Resolve target namespace + fetch Deployment ---
 	targetNS := watch.Spec.TargetRef.Namespace
 	if targetNS == "" {
 		targetNS = watch.Namespace
 	}
 
-	// --- 3. Fetch the target Deployment ---
 	var deployment appsv1.Deployment
 	deployKey := types.NamespacedName{Name: watch.Spec.TargetRef.Name, Namespace: targetNS}
 	if err := r.Get(ctx, deployKey, &deployment); err != nil {
@@ -121,7 +121,7 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("fetching Deployment %s: %w", deployKey, err)
 	}
 
-	// --- 4. Detect anomaly ---
+	// --- 3. Detect anomaly ---
 	threshold := watch.Spec.RestartThreshold
 	if threshold == 0 {
 		threshold = 3
@@ -131,29 +131,31 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("detecting anomaly: %w", err)
 	}
 
-	// --- 5. Handle anomaly or healthy ---
-	statusPatch := client.MergeFrom(watch.DeepCopy())
-
 	if !anomaly {
-		watch.Status.Phase = opsv1alpha1.PhaseHealthy
-		if err := r.Status().Patch(ctx, &watch, statusPatch); err != nil {
-			return ctrl.Result{}, fmt.Errorf("patching status healthy: %w", err)
-		}
-		return ctrl.Result{RequeueAfter: requeueInterval}, nil
+		return r.setHealthy(ctx, req, &watch)
 	}
 
 	// --- Anomaly path ---
 	logger.Info("🚨 Houston, we have a problem!",
-		"deployment", deployKey,
-		"reason", reason,
-	)
+		"deployment", deployKey, "reason", reason)
 	r.Recorder.Event(&watch, corev1.EventTypeWarning, "AnomalyDetected", reason)
 
-	// Collect observability context.
+	// Anti-loop guard: skip LLM+PR if we've already hit the cap.
+	if watch.Status.HealingScore >= ggithub.MaxHealingAttempts {
+		logger.Info("⛔ MaxHealingAttempts reached — not opening another PR",
+			"score", watch.Status.HealingScore,
+			"max", ggithub.MaxHealingAttempts,
+		)
+		r.Recorder.Event(&watch, corev1.EventTypeWarning, "HealingCapReached",
+			fmt.Sprintf("HealingScore %d >= MaxHealingAttempts %d; manual intervention required",
+				watch.Status.HealingScore, ggithub.MaxHealingAttempts))
+		return ctrl.Result{RequeueAfter: requeueInterval}, nil
+	}
+
+	// --- 4a. Collect ObservabilityContext ---
 	obs, err := r.Collector.Collect(ctx, &deployment, reason)
 	if err != nil {
 		logger.Error(err, "failed to collect observability context")
-		// Continue with a minimal context so the LLM still gets something.
 		obs = &observability.ObservabilityContext{
 			DeploymentName: deployment.Name,
 			Namespace:      deployment.Namespace,
@@ -164,62 +166,93 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.Info(obs.Summary())
 	}
 
-	// Mark Healing before the LLM call (can be slow).
+	// --- 4b. Set phase = Healing before slow LLM call ---
 	now := metav1.Now()
-	watch.Status.Phase = opsv1alpha1.PhaseHealing
-	watch.Status.LastAnomalyTime = &now
-	if err := r.Status().Patch(ctx, &watch, statusPatch); err != nil {
-		return ctrl.Result{}, fmt.Errorf("patching status to Healing: %w", err)
+	if err := r.patchStatus(ctx, req, func(w *opsv1alpha1.AegisWatch) {
+		w.Status.Phase = opsv1alpha1.PhaseHealing
+		w.Status.LastAnomalyTime = &now
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// --- Call the LLM ---
+	// --- 4c. LLM diagnosis ---
 	diagnosis, diagErr := r.runDiagnosis(ctx, &watch, obs)
 	if diagErr != nil {
-		logger.Error(diagErr, "LLM diagnosis failed — marking Degraded")
+		logger.Error(diagErr, "LLM diagnosis failed")
 		r.Recorder.Event(&watch, corev1.EventTypeWarning, "DiagnosisFailed", diagErr.Error())
-
-		// Re-fetch (status patch above changed resourceVersion).
-		if err := r.Get(ctx, req.NamespacedName, &watch); err != nil {
-			return ctrl.Result{}, fmt.Errorf("re-fetching AegisWatch after heal patch: %w", err)
-		}
-		patch2 := client.MergeFrom(watch.DeepCopy())
-		watch.Status.Phase = opsv1alpha1.PhaseDegraded
-		if err := r.Status().Patch(ctx, &watch, patch2); err != nil {
-			return ctrl.Result{}, fmt.Errorf("patching status to Degraded after LLM failure: %w", err)
-		}
+		_ = r.patchStatus(ctx, req, func(w *opsv1alpha1.AegisWatch) {
+			w.Status.Phase = opsv1alpha1.PhaseDegraded
+		})
 		return ctrl.Result{RequeueAfter: requeueInterval}, nil
 	}
 
-	// --- Store diagnosis in status ---
-	diagSummary := fmt.Sprintf("%s\n\n💬 %s", diagnosis.RootCause, diagnosis.WittyLine)
-
-	// Re-fetch before the final status patch.
-	if err := r.Get(ctx, req.NamespacedName, &watch); err != nil {
-		return ctrl.Result{}, fmt.Errorf("re-fetching AegisWatch before final patch: %w", err)
-	}
-	patch3 := client.MergeFrom(watch.DeepCopy())
-	watch.Status.Phase = opsv1alpha1.PhaseDegraded // stays Degraded until PR is merged (Phase 4)
-	watch.Status.LastDiagnosis = diagSummary
-	if err := r.Status().Patch(ctx, &watch, patch3); err != nil {
-		return ctrl.Result{}, fmt.Errorf("patching final diagnosis status: %w", err)
-	}
-
-	// --- Emit K8s event and print gopher art ---
-	r.Recorder.Event(&watch, corev1.EventTypeNormal, "DiagnosisComplete",
-		fmt.Sprintf("AI diagnosis: %s", diagnosis.RootCause))
-
+	// Print gopher art + diagnosis to operator stdout.
 	logger.Info(gopherArt +
 		"Root cause : " + diagnosis.RootCause + "\n" +
 		"Witty line : " + diagnosis.WittyLine + "\n" +
 		"YAML patch : " + yesNo(diagnosis.YAMLPatch != "") + "\n")
 
-	// Phase 4 hook: open GitHub PR with diagnosis.YAMLPatch here.
-	_ = diagnosis.YAMLPatch
+	r.Recorder.Event(&watch, corev1.EventTypeNormal, "DiagnosisComplete",
+		fmt.Sprintf("AI diagnosis: %s", diagnosis.RootCause))
+
+	// --- 4d. Open GitHub PR ---
+	var prURL string
+	if err := r.maybeOpenPR(ctx, &watch, &deployment, diagnosis, targetNS, &prURL); err != nil {
+		// PR failure is non-fatal: log + notify but don't fail the reconcile.
+		logger.Error(err, "failed to create healing PR")
+		r.Recorder.Event(&watch, corev1.EventTypeWarning, "PRCreationFailed", err.Error())
+	}
+
+	// --- 4e. Update status ---
+	diagSummary := fmt.Sprintf("%s\n\n💬 %s", diagnosis.RootCause, diagnosis.WittyLine)
+	if err := r.patchStatus(ctx, req, func(w *opsv1alpha1.AegisWatch) {
+		w.Status.Phase = opsv1alpha1.PhaseDegraded // stays until PR is merged
+		w.Status.LastDiagnosis = diagSummary
+		if prURL != "" {
+			w.Status.LastPRURL = prURL
+			w.Status.HealingScore++
+		}
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// --- 4f. Send webhook notification ---
+	if err := r.sendNotification(ctx, &watch, diagnosis, prURL, targetNS); err != nil {
+		logger.Error(err, "webhook notification failed (non-fatal)")
+	}
 
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
 }
 
-// runDiagnosis builds the LLM client from the CR spec and calls Diagnose.
+// setHealthy patches the AegisWatch status to Healthy and requeues.
+func (r *AegisWatchReconciler) setHealthy(ctx context.Context, req ctrl.Request, watch *opsv1alpha1.AegisWatch) (ctrl.Result, error) {
+	if err := r.patchStatus(ctx, req, func(w *opsv1alpha1.AegisWatch) {
+		w.Status.Phase = opsv1alpha1.PhaseHealthy
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// patchStatus re-fetches the CR, applies mutFn, and patches .status.
+func (r *AegisWatchReconciler) patchStatus(
+	ctx context.Context,
+	req ctrl.Request,
+	mutFn func(*opsv1alpha1.AegisWatch),
+) error {
+	var watch opsv1alpha1.AegisWatch
+	if err := r.Get(ctx, req.NamespacedName, &watch); err != nil {
+		return fmt.Errorf("re-fetching AegisWatch for status patch: %w", err)
+	}
+	patch := client.MergeFrom(watch.DeepCopy())
+	mutFn(&watch)
+	if err := r.Status().Patch(ctx, &watch, patch); err != nil {
+		return fmt.Errorf("patching AegisWatch status: %w", err)
+	}
+	return nil
+}
+
+// runDiagnosis builds the correct LLM client and calls Diagnose.
 func (r *AegisWatchReconciler) runDiagnosis(
 	ctx context.Context,
 	watch *opsv1alpha1.AegisWatch,
@@ -232,7 +265,103 @@ func (r *AegisWatchReconciler) runDiagnosis(
 	return llmClient.Diagnose(ctx, obs)
 }
 
-// detectAnomaly scans pods belonging to the Deployment for known failure conditions.
+// maybeOpenPR creates a GitHub PR if conditions are met.
+// prURL is set to the created PR URL on success.
+func (r *AegisWatchReconciler) maybeOpenPR(
+	ctx context.Context,
+	watch *opsv1alpha1.AegisWatch,
+	deployment *appsv1.Deployment,
+	diagnosis *llm.Diagnosis,
+	targetNS string,
+	prURL *string,
+) error {
+	logger := log.FromContext(ctx)
+
+	if watch.Spec.SafeMode {
+		logger.Info("🔒 safeMode=true — skipping PR creation, diagnosis logged only")
+		return nil
+	}
+	if diagnosis.YAMLPatch == "" {
+		logger.Info("LLM returned no YAML patch — skipping PR")
+		return nil
+	}
+
+	// Read GitHub token from K8s Secret.
+	githubToken, err := readSecretKey(ctx, r.Client, watch.Namespace, watch.Spec.GitSecretRef, "token")
+	if err != nil {
+		return fmt.Errorf("reading GitHub token from secret %q: %w", watch.Spec.GitSecretRef, err)
+	}
+
+	owner, repo, err := ggithub.SplitRepo(watch.Spec.GitRepo)
+	if err != nil {
+		return err
+	}
+
+	ghClient := ggithub.NewGitHubPRClient(githubToken)
+	result, err := ghClient.CreateHealingPR(ctx, ggithub.PRRequest{
+		Owner:          owner,
+		Repo:           repo,
+		DeploymentName: deployment.Name,
+		Namespace:      targetNS,
+		Diagnosis:      diagnosis,
+		HealingScore:   watch.Status.HealingScore,
+	})
+	if err != nil {
+		return err
+	}
+
+	*prURL = result.PRURL
+	logger.Info("✅ Healing PR created", "url", result.PRURL, "branch", result.BranchName)
+	r.Recorder.Event(watch, corev1.EventTypeNormal, "PRCreated",
+		fmt.Sprintf("Healing PR opened: %s", result.PRURL))
+	return nil
+}
+
+// sendNotification fires a Slack/Discord webhook if a secret ref is configured.
+// We reuse the gitSecretRef secret and look for an optional "webhookUrl" key.
+func (r *AegisWatchReconciler) sendNotification(
+	ctx context.Context,
+	watch *opsv1alpha1.AegisWatch,
+	diagnosis *llm.Diagnosis,
+	prURL, targetNS string,
+) error {
+	webhookURL := ""
+	if watch.Spec.GitSecretRef != "" {
+		// Best-effort: if the secret has a "webhookUrl" key, use it.
+		u, err := readSecretKey(ctx, r.Client, watch.Namespace, watch.Spec.GitSecretRef, "webhookUrl")
+		if err == nil {
+			webhookURL = u
+		}
+	}
+
+	notifier := notify.NewNotificationClient(webhookURL)
+	return notifier.SendHealingUpdate(ctx, notify.HealingUpdate{
+		DeploymentName: watch.Spec.TargetRef.Name,
+		Namespace:      targetNS,
+		Diagnosis:      diagnosis,
+		PRURL:          prURL,
+		HealingScore:   watch.Status.HealingScore + 1,
+		SafeMode:       watch.Spec.SafeMode,
+	})
+}
+
+// readSecretKey fetches one value from a Kubernetes Secret by key name.
+func readSecretKey(ctx context.Context, c client.Client, namespace, secretName, key string) (string, error) {
+	if secretName == "" {
+		return "", fmt.Errorf("secret name is empty")
+	}
+	var secret corev1.Secret
+	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, &secret); err != nil {
+		return "", fmt.Errorf("get secret %s/%s: %w", namespace, secretName, err)
+	}
+	val, ok := secret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("secret %s/%s has no key %q", namespace, secretName, key)
+	}
+	return string(val), nil
+}
+
+// detectAnomaly scans pods for known failure conditions.
 func detectAnomaly(
 	ctx context.Context,
 	c client.Client,
