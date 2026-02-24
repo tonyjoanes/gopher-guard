@@ -37,10 +37,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	opsv1alpha1 "github.com/tonyjoanes/gopher-guard/api/v1alpha1"
+	"github.com/tonyjoanes/gopher-guard/internal/llm"
 	"github.com/tonyjoanes/gopher-guard/internal/observability"
 )
 
 const requeueInterval = 30 * time.Second
+
+// gopherArt is printed to stdout whenever GopherGuard delivers an AI diagnosis.
+const gopherArt = `
+    /\_____/\
+   /  o   o  \   G O P H E R G U A R D
+  ( ==  ^  == )  ─────────────────────────
+   )         (   AI Diagnosis:
+  (           )
+ ( (  )   (  ) )
+(__(__)___(__)__)
+`
 
 // AegisWatchReconciler reconciles an AegisWatch object.
 type AegisWatchReconciler struct {
@@ -65,12 +77,13 @@ type AegisWatchReconciler struct {
 //  2. Resolve and fetch the target Deployment.
 //  3. Scan pods for anomalies (CrashLoopBackOff, OOMKilled, excessive restarts,
 //     unavailable replicas).
-//  4. On anomaly: collect full ObservabilityContext (logs + events + metrics),
-//     emit a Kubernetes Event on the CR, update .status.phase = Degraded,
-//     record lastAnomalyTime.
-//  5. On healthy: update .status.phase = Healthy.
-//
-// Phase 3 will call the LLM with the ObservabilityContext.
+//  4. On anomaly:
+//     a. Collect ObservabilityContext (logs + events + metrics).
+//     b. Set phase = Healing, patch status.
+//     c. Build LLM client from spec, call Diagnose.
+//     d. Store root cause + witty line in lastDiagnosis.
+//     e. Emit K8s Event on the CR. Log gopher art + diagnosis.
+//  5. On healthy: set phase = Healthy.
 func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -111,53 +124,115 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// --- 4. Detect anomaly ---
 	threshold := watch.Spec.RestartThreshold
 	if threshold == 0 {
-		threshold = 3 // spec default may not be applied yet on brand-new objects
+		threshold = 3
 	}
 	anomaly, reason, err := detectAnomaly(ctx, r.Client, &deployment, threshold)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("detecting anomaly: %w", err)
 	}
 
-	// --- 5. Collect observability data and update status ---
-	patch := client.MergeFrom(watch.DeepCopy())
+	// --- 5. Handle anomaly or healthy ---
+	statusPatch := client.MergeFrom(watch.DeepCopy())
 
-	if anomaly {
-		logger.Info("🚨 Houston, we have a problem!",
-			"deployment", deployKey,
-			"reason", reason,
-		)
-
-		// Emit a Kubernetes Warning event on the AegisWatch CR.
-		r.Recorder.Event(&watch, corev1.EventTypeWarning, "AnomalyDetected", reason)
-
-		// Collect full observability context (logs + events + metrics).
-		obs, err := r.Collector.Collect(ctx, &deployment, reason)
-		if err != nil {
-			// Non-fatal: log and continue — we still update the phase.
-			logger.Error(err, "failed to collect observability context")
-		} else {
-			logger.Info(obs.Summary())
-			// Phase 3 hook: pass obs to LLM here.
-			_ = obs
-		}
-
-		now := metav1.Now()
-		watch.Status.Phase = opsv1alpha1.PhaseDegraded
-		watch.Status.LastAnomalyTime = &now
-
-	} else {
+	if !anomaly {
 		watch.Status.Phase = opsv1alpha1.PhaseHealthy
+		if err := r.Status().Patch(ctx, &watch, statusPatch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("patching status healthy: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: requeueInterval}, nil
 	}
 
-	if err := r.Status().Patch(ctx, &watch, patch); err != nil {
-		return ctrl.Result{}, fmt.Errorf("patching AegisWatch status: %w", err)
+	// --- Anomaly path ---
+	logger.Info("🚨 Houston, we have a problem!",
+		"deployment", deployKey,
+		"reason", reason,
+	)
+	r.Recorder.Event(&watch, corev1.EventTypeWarning, "AnomalyDetected", reason)
+
+	// Collect observability context.
+	obs, err := r.Collector.Collect(ctx, &deployment, reason)
+	if err != nil {
+		logger.Error(err, "failed to collect observability context")
+		// Continue with a minimal context so the LLM still gets something.
+		obs = &observability.ObservabilityContext{
+			DeploymentName: deployment.Name,
+			Namespace:      deployment.Namespace,
+			AnomalyReason:  reason,
+			CollectedAt:    time.Now(),
+		}
+	} else {
+		logger.Info(obs.Summary())
 	}
+
+	// Mark Healing before the LLM call (can be slow).
+	now := metav1.Now()
+	watch.Status.Phase = opsv1alpha1.PhaseHealing
+	watch.Status.LastAnomalyTime = &now
+	if err := r.Status().Patch(ctx, &watch, statusPatch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("patching status to Healing: %w", err)
+	}
+
+	// --- Call the LLM ---
+	diagnosis, diagErr := r.runDiagnosis(ctx, &watch, obs)
+	if diagErr != nil {
+		logger.Error(diagErr, "LLM diagnosis failed — marking Degraded")
+		r.Recorder.Event(&watch, corev1.EventTypeWarning, "DiagnosisFailed", diagErr.Error())
+
+		// Re-fetch (status patch above changed resourceVersion).
+		if err := r.Get(ctx, req.NamespacedName, &watch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("re-fetching AegisWatch after heal patch: %w", err)
+		}
+		patch2 := client.MergeFrom(watch.DeepCopy())
+		watch.Status.Phase = opsv1alpha1.PhaseDegraded
+		if err := r.Status().Patch(ctx, &watch, patch2); err != nil {
+			return ctrl.Result{}, fmt.Errorf("patching status to Degraded after LLM failure: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: requeueInterval}, nil
+	}
+
+	// --- Store diagnosis in status ---
+	diagSummary := fmt.Sprintf("%s\n\n💬 %s", diagnosis.RootCause, diagnosis.WittyLine)
+
+	// Re-fetch before the final status patch.
+	if err := r.Get(ctx, req.NamespacedName, &watch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("re-fetching AegisWatch before final patch: %w", err)
+	}
+	patch3 := client.MergeFrom(watch.DeepCopy())
+	watch.Status.Phase = opsv1alpha1.PhaseDegraded // stays Degraded until PR is merged (Phase 4)
+	watch.Status.LastDiagnosis = diagSummary
+	if err := r.Status().Patch(ctx, &watch, patch3); err != nil {
+		return ctrl.Result{}, fmt.Errorf("patching final diagnosis status: %w", err)
+	}
+
+	// --- Emit K8s event and print gopher art ---
+	r.Recorder.Event(&watch, corev1.EventTypeNormal, "DiagnosisComplete",
+		fmt.Sprintf("AI diagnosis: %s", diagnosis.RootCause))
+
+	logger.Info(gopherArt +
+		"Root cause : " + diagnosis.RootCause + "\n" +
+		"Witty line : " + diagnosis.WittyLine + "\n" +
+		"YAML patch : " + yesNo(diagnosis.YAMLPatch != "") + "\n")
+
+	// Phase 4 hook: open GitHub PR with diagnosis.YAMLPatch here.
+	_ = diagnosis.YAMLPatch
 
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
 }
 
+// runDiagnosis builds the LLM client from the CR spec and calls Diagnose.
+func (r *AegisWatchReconciler) runDiagnosis(
+	ctx context.Context,
+	watch *opsv1alpha1.AegisWatch,
+	obs *observability.ObservabilityContext,
+) (*llm.Diagnosis, error) {
+	llmClient, err := llm.NewFromSpec(ctx, r.Client, watch)
+	if err != nil {
+		return nil, fmt.Errorf("building LLM client: %w", err)
+	}
+	return llmClient.Diagnose(ctx, obs)
+}
+
 // detectAnomaly scans pods belonging to the Deployment for known failure conditions.
-// Returns (true, reason, nil) when an anomaly is found.
 func detectAnomaly(
 	ctx context.Context,
 	c client.Client,
@@ -214,7 +289,6 @@ func detectAnomaly(
 	return false, "", nil
 }
 
-// selectorFromDeployment extracts pod matchLabels from a Deployment spec.
 func selectorFromDeployment(d *appsv1.Deployment) (map[string]string, error) {
 	if d.Spec.Selector == nil || len(d.Spec.Selector.MatchLabels) == 0 {
 		return nil, fmt.Errorf("deployment %s/%s has no matchLabels selector", d.Namespace, d.Name)
@@ -222,24 +296,24 @@ func selectorFromDeployment(d *appsv1.Deployment) (map[string]string, error) {
 	return d.Spec.Selector.MatchLabels, nil
 }
 
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
 // SetupWithManager wires the reconciler into the controller-runtime manager.
-// It watches:
-//   - AegisWatch CRs (primary)
-//   - Pods: re-enqueues every AegisWatch whose target namespace matches the pod's
-//     namespace, so the controller reacts immediately to pod restarts/crashes.
 func (r *AegisWatchReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// podToAegisWatches maps a Pod event to the AegisWatch CRs that monitor it.
 	podToAegisWatches := func(ctx context.Context, obj client.Object) []reconcile.Request {
 		pod, ok := obj.(*corev1.Pod)
 		if !ok {
 			return nil
 		}
-
 		var watchList opsv1alpha1.AegisWatchList
 		if err := r.List(ctx, &watchList); err != nil {
 			return nil
 		}
-
 		var requests []reconcile.Request
 		for _, aw := range watchList.Items {
 			targetNS := aw.Spec.TargetRef.Namespace
@@ -260,7 +334,6 @@ func (r *AegisWatchReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&opsv1alpha1.AegisWatch{}).
-		// Re-reconcile when any Pod in a watched namespace changes state.
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(podToAegisWatches),

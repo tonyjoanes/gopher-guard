@@ -74,35 +74,24 @@
 ## Phase 3 — AIOps / LLM Integration
 
 ### 3.1 LLM client abstraction
-- [ ] Define `LLMClient` interface:
-  ```go
-  type LLMClient interface {
-      Diagnose(ctx context.Context, obs ObservabilityContext) (Diagnosis, error)
-  }
-  ```
-- [ ] Implement `GroqClient` (OpenAI-compatible REST, `net/http`)
-- [ ] Implement `OllamaClient` (local, `net/http` to `localhost:11434`)
-- [ ] Wire provider selection from `AegisWatchSpec.llmProvider`
+- [x] Define `LLMClient` interface (`internal/llm/client.go`) + `Diagnosis` struct (`RootCause`, `YAMLPatch`, `WittyLine`)
+- [x] Implement `GroqClient` — OpenAI-compatible REST (`internal/llm/groq.go`), `json_object` response format, 60s timeout, 2-attempt retry
+- [x] Implement `OllamaClient` — Ollama `/api/chat` with `format: json` (`internal/llm/ollama.go`), 3-min timeout for slow local models
+- [x] `NewFromSpec()` factory (`internal/llm/factory.go`) — reads API key from K8s Secret, selects provider from `spec.llmProvider`, defaults model per provider
 
 ### 3.2 Prompt engineering
-- [ ] Write system prompt that instructs LLM to:
-  - Return structured JSON: `{ "rootCause": "...", "patch": "...yaml...", "wittyLine": "..." }`
-  - Keep YAML patch minimal and safe (no image tag changes without explicit permission)
-- [ ] Build user prompt from `ObservabilityContext`: include resource YAML, logs, events, metrics
-- [ ] Parse and validate LLM JSON response into `Diagnosis` struct:
-  ```go
-  type Diagnosis struct {
-      RootCause string
-      YAMLPatch string
-      WittyLine string
-  }
-  ```
-- [ ] Handle LLM errors gracefully (retry once, then update status with error)
+- [x] System prompt (`internal/llm/prompt.go`): strict JSON schema, patch rules (no image changes, only resources/env/probes/replicas), witty line constraints
+- [x] `BuildUserPrompt()`: structured markdown with deployment metadata, Prometheus metrics, per-pod/container state, log tails (capped at 3000 chars), K8s events table
+- [x] `parseDiagnosis()`: JSON unmarshal → `Diagnosis`; validates non-empty `rootCause`
+- [x] Retry once on transient LLM failure; error stored as K8s Event on CR
 
 ### 3.3 Reconciler integration
-- [ ] Call LLM when `phase == Degraded`
-- [ ] Store `Diagnosis.RootCause` + `Diagnosis.WittyLine` in `AegisWatchStatus.lastDiagnosis`
-- [ ] Log witty line to operator stdout with a gopher ASCII art prefix
+- [x] Phase transitions: Degraded → **Healing** (before LLM call) → Degraded (after, until Phase 4 PR merge)
+- [x] `runDiagnosis()` builds LLM client per-reconcile from live CR spec + secret
+- [x] `lastDiagnosis` in status: `"<rootCause>\n\n💬 <wittyLine>"`
+- [x] K8s Event `DiagnosisComplete` emitted on success; `DiagnosisFailed` on error
+- [x] Gopher ASCII art + root cause + witty line + patch indicator logged to stdout
+- [x] `_ = diagnosis.YAMLPatch` Phase 4 hook ready for PR creation
 
 **Milestone 3**: Operator outputs "AI says: add memory limit 256Mi — *This pod crashed harder than my hopes for Monday.*" ✓
 
@@ -199,7 +188,7 @@
 |-------|--------|
 | 1 — Foundation | ✅ Done |
 | 2 — Observability | ✅ Done |
-| 3 — LLM Integration | ⬜ Not started |
+| 3 — LLM Integration | ✅ Done |
 | 4 — GitOps Loop / Auto-PR | ⬜ Not started |
 | 5 — Self-managed via GitOps | ⬜ Not started |
 | 6 — HTMX Dashboard | ⬜ Not started |
