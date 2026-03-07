@@ -257,6 +257,27 @@ func buildPRBody(req PRRequest, filePath string) string {
 	return sb.String()
 }
 
+// CloseHealingPR closes an open PR by its HTML URL if it is still open.
+// The PR number is extracted from the URL. Errors are non-fatal — the caller
+// should log and continue.
+func (c *GitHubPRClient) CloseHealingPR(ctx context.Context, owner, repo, prURL string) error {
+	// Extract PR number from URL: ".../pulls/123"
+	parts := strings.Split(prURL, "/")
+	if len(parts) == 0 {
+		return fmt.Errorf("cannot parse PR number from URL: %s", prURL)
+	}
+	var prNum int
+	if _, err := fmt.Sscan(parts[len(parts)-1], &prNum); err != nil {
+		return fmt.Errorf("cannot parse PR number from URL %s: %w", prURL, err)
+	}
+
+	closed := "closed"
+	_, _, err := c.gh.PullRequests.Edit(ctx, owner, repo, prNum, &gogithub.PullRequest{
+		State: &closed,
+	})
+	return err
+}
+
 // SplitRepo splits "owner/repo" into (owner, repo).
 // Returns an error if the format is invalid.
 func SplitRepo(gitRepo string) (owner, repo string, err error) {

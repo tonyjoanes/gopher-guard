@@ -49,6 +49,9 @@ const (
 	reasonCrashLoopBackOff = "CrashLoopBackOff"
 	// reasonOOMKilled is the Kubernetes termination reason for out-of-memory kills.
 	reasonOOMKilled = "OOMKilled"
+
+	// finalizer is registered on every AegisWatch to allow cleanup on deletion.
+	finalizer = "gopherguard.ops.gopherguard.dev/cleanup"
 )
 
 const requeueInterval = 30 * time.Second
@@ -110,6 +113,20 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"target", watch.Spec.TargetRef.Name,
 		"phase", watch.Status.Phase,
 	)
+
+	// --- Handle deletion ---
+	if !watch.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, &watch)
+	}
+
+	// Ensure our finalizer is registered so cleanup runs on deletion.
+	if !containsString(watch.Finalizers, finalizer) {
+		watch.Finalizers = append(watch.Finalizers, finalizer)
+		if err := r.Update(ctx, &watch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
+		}
+		return ctrl.Result{}, nil // requeue after update
+	}
 
 	// --- 2. Resolve target namespace + fetch Deployment ---
 	targetNS := resolveTargetNamespace(watch.Spec.TargetRef.Namespace, watch.Namespace)
@@ -436,6 +453,55 @@ func yesNo(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// handleDeletion runs cleanup when an AegisWatch is being deleted, then
+// removes the finalizer so Kubernetes can garbage-collect the object.
+func (r *AegisWatchReconciler) handleDeletion(ctx context.Context, watch *opsv1alpha1.AegisWatch) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("🧹 AegisWatch deleted — running cleanup", "name", watch.Name)
+
+	// Close any open healing PR if we know its URL.
+	if watch.Status.LastPRURL != "" && watch.Spec.GitSecretRef != "" {
+		token, _ := r.readGitSecrets(ctx, watch)
+		if token != "" {
+			owner, repo, err := ggithub.SplitRepo(watch.Spec.GitRepo)
+			if err == nil {
+				ghClient := ggithub.NewGitHubPRClient(ctx, token)
+				if closeErr := ghClient.CloseHealingPR(ctx, owner, repo, watch.Status.LastPRURL); closeErr != nil {
+					logger.Error(closeErr, "could not close healing PR on deletion (non-fatal)", "url", watch.Status.LastPRURL)
+				} else {
+					logger.Info("✅ Closed healing PR", "url", watch.Status.LastPRURL)
+				}
+			}
+		}
+	}
+
+	// Remove finalizer — allows Kubernetes to delete the object.
+	watch.Finalizers = removeString(watch.Finalizers, finalizer)
+	if err := r.Update(ctx, watch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
+
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(slice []string, s string) []string {
+	out := make([]string, 0, len(slice))
+	for _, v := range slice {
+		if v != s {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // SetupWithManager wires the reconciler into the controller-runtime manager.
