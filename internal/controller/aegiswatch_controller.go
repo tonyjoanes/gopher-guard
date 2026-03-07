@@ -40,6 +40,7 @@ import (
 	ggithub "github.com/tonyjoanes/gopher-guard/internal/github"
 	ggk8s "github.com/tonyjoanes/gopher-guard/internal/k8s"
 	"github.com/tonyjoanes/gopher-guard/internal/llm"
+	ggmetrics "github.com/tonyjoanes/gopher-guard/internal/metrics"
 	"github.com/tonyjoanes/gopher-guard/internal/notify"
 	"github.com/tonyjoanes/gopher-guard/internal/observability"
 )
@@ -97,6 +98,7 @@ type AegisWatchReconciler struct {
 //     f. Send Slack/Discord notification.
 //  4. On healthy: set phase = Healthy.
 func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	start := time.Now()
 	logger := log.FromContext(ctx)
 
 	// --- 1. Fetch AegisWatch CR ---
@@ -154,8 +156,12 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if !anomaly {
+		ggmetrics.ReconcileDuration.WithLabelValues("success").Observe(time.Since(start).Seconds())
 		return r.setHealthy(ctx, req, &watch)
 	}
+
+	// Record anomaly metric.
+	ggmetrics.AnomaliesDetected.WithLabelValues(targetNS, reason).Inc()
 
 	// --- Anomaly path ---
 	logger.Info("🚨 Houston, we have a problem!",
@@ -246,6 +252,7 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.Error(err, "webhook notification failed (non-fatal)")
 	}
 
+	ggmetrics.ReconcileDuration.WithLabelValues("success").Observe(time.Since(start).Seconds())
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
 }
 
@@ -287,7 +294,15 @@ func (r *AegisWatchReconciler) runDiagnosis(
 	if err != nil {
 		return nil, fmt.Errorf("building LLM client: %w", err)
 	}
-	return llmClient.Diagnose(ctx, obs)
+	provider := string(watch.Spec.LLMProvider)
+	start := time.Now()
+	d, err := llmClient.Diagnose(ctx, obs)
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	ggmetrics.LLMRequestDuration.WithLabelValues(provider, result).Observe(time.Since(start).Seconds())
+	return d, err
 }
 
 // readGitSecrets reads the GitHub token and optional webhook URL from the
@@ -352,6 +367,8 @@ func (r *AegisWatchReconciler) maybeOpenPR(
 	}
 
 	*prURL = result.PRURL
+	ggmetrics.PRsCreated.WithLabelValues(deployment.Name, targetNS).Inc()
+	ggmetrics.HealingAttempts.WithLabelValues(deployment.Name, targetNS, "created").Inc()
 	logger.Info("✅ Healing PR created", "url", result.PRURL, "branch", result.BranchName)
 	r.Recorder.Event(watch, corev1.EventTypeNormal, "PRCreated",
 		fmt.Sprintf("Healing PR opened: %s", result.PRURL))

@@ -1,0 +1,84 @@
+{{- if .Values.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "gopher-guard.fullname" . }}-manager
+  labels:
+    {{- include "gopher-guard.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["ops.gopherguard.dev"]
+    resources: ["aegiswatches"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["ops.gopherguard.dev"]
+    resources: ["aegiswatches/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["ops.gopherguard.dev"]
+    resources: ["aegiswatches/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "gopher-guard.fullname" . }}-manager
+  labels:
+    {{- include "gopher-guard.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "gopher-guard.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gopher-guard.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election role (namespace-scoped).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gopher-guard.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gopher-guard.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gopher-guard.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gopher-guard.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gopher-guard.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gopher-guard.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

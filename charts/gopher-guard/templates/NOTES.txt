@@ -1,0 +1,33 @@
+GopherGuard has been installed! 🐹
+
+The operator is running in namespace: {{ .Release.Namespace }}
+
+To start watching a Deployment, create an AegisWatch CR:
+
+  kubectl apply -f - <<EOF
+  apiVersion: ops.gopherguard.dev/v1alpha1
+  kind: AegisWatch
+  metadata:
+    name: my-app-watcher
+    namespace: {{ .Release.Namespace }}
+  spec:
+    targetRef:
+      name: my-deployment
+      namespace: default
+    llmProvider: groq
+    llmSecretRef: groq-api-key      # Secret with key "apiKey"
+    gitRepo: owner/repo
+    gitSecretRef: github-token      # Secret with key "token"
+    safeMode: false
+    restartThreshold: 3
+  EOF
+
+Watch GopherGuard detect and heal anomalies:
+
+  kubectl get aegiswatch -n {{ .Release.Namespace }} -w
+
+Check operator logs:
+
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name=gopher-guard -f
+
+Documentation: https://github.com/tonyjoanes/gopher-guard

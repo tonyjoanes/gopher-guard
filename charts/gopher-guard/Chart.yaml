@@ -1,0 +1,20 @@
+apiVersion: v2
+name: gopher-guard
+description: AI-powered self-healing Kubernetes operator. Watches Deployments, diagnoses failures with an LLM, and opens automated healing PRs.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - operator
+  - self-healing
+  - gitops
+  - ai
+  - llm
+home: https://github.com/tonyjoanes/gopher-guard
+sources:
+  - https://github.com/tonyjoanes/gopher-guard
+maintainers:
+  - name: tonyjoanes
+    url: https://github.com/tonyjoanes
+icon: https://raw.githubusercontent.com/tonyjoanes/gopher-guard/main/docs/logo.png
