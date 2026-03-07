@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -60,54 +61,47 @@ func (c *Collector) Collect(
 		involvedNames[pod.Name] = true
 	}
 
-	// --- 2. Collect per-pod snapshots (logs included) ---
-	for i := range podList.Items {
-		pod := &podList.Items[i]
-		snap := PodSnapshot{
-			Name:     pod.Name,
-			Phase:    string(pod.Status.Phase),
-			NodeName: pod.Spec.NodeName,
-		}
+	// --- 2. Collect per-pod snapshots (logs fetched concurrently per container) ---
+	obs.Pods = c.collectPodSnapshots(ctx, podList.Items)
 
-		for _, cs := range pod.Status.ContainerStatuses {
-			state := containerStateString(cs)
-			logs, err := FetchContainerLogs(ctx, c.KubeClient, pod.Namespace, pod.Name, cs.Name)
-			if err != nil {
-				logger.V(1).Info("could not fetch container logs",
-					"pod", pod.Name, "container", cs.Name, "err", err)
-				logs = fmt.Sprintf("[log unavailable: %v]", err)
-			}
+	// --- 3 & 4. Fetch events and Prometheus metrics concurrently ---
+	var (
+		wg      sync.WaitGroup
+		evErr   error
+		promErr error
+	)
 
-			// Find the image from the spec (status only has imageID).
-			image := imageForContainer(pod, cs.Name)
-
-			snap.Containers = append(snap.Containers, ContainerSnapshot{
-				Name:         cs.Name,
-				Image:        image,
-				RestartCount: cs.RestartCount,
-				State:        state,
-				LastLogs:     logs,
-			})
-		}
-		obs.Pods = append(obs.Pods, snap)
-	}
-
-	// --- 3. Fetch Kubernetes Warning events ---
-	events, err := FetchKubeEvents(ctx, c.CtrlClient, deployment.Namespace, involvedNames)
-	if err != nil {
-		logger.V(1).Info("could not fetch kube events", "err", err)
-	} else {
-		obs.KubeEvents = events
-	}
-
-	// --- 4. Fetch Prometheus metrics (optional) ---
-	if c.Prometheus != nil {
-		metrics, err := c.Prometheus.QueryWorkload(ctx, deployment.Namespace, deployment.Name)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		events, err := FetchKubeEvents(ctx, c.CtrlClient, deployment.Namespace, involvedNames)
 		if err != nil {
-			logger.V(1).Info("prometheus query failed — continuing without metrics", "err", err)
-		} else {
-			obs.Metrics = metrics
+			evErr = err
+			return
 		}
+		obs.KubeEvents = events
+	}()
+
+	if c.Prometheus != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			metrics, err := c.Prometheus.QueryWorkload(ctx, deployment.Namespace, deployment.Name)
+			if err != nil {
+				promErr = err
+				return
+			}
+			obs.Metrics = metrics
+		}()
+	}
+
+	wg.Wait()
+
+	if evErr != nil {
+		logger.V(1).Info("could not fetch kube events", "err", evErr)
+	}
+	if promErr != nil {
+		logger.V(1).Info("prometheus query failed — continuing without metrics", "err", promErr)
 	}
 
 	logger.Info("📦 ObservabilityContext collected",
@@ -117,6 +111,75 @@ func (c *Collector) Collect(
 	)
 
 	return obs, nil
+}
+
+// collectPodSnapshots builds PodSnapshot entries, fetching container logs
+// concurrently across all containers in all pods.
+func (c *Collector) collectPodSnapshots(ctx context.Context, pods []corev1.Pod) []PodSnapshot {
+	type indexedSnap struct {
+		idx  int
+		snap PodSnapshot
+	}
+
+	results := make(chan indexedSnap, len(pods))
+	var wg sync.WaitGroup
+
+	for i := range pods {
+		pod := &pods[i]
+		wg.Add(1)
+		go func(idx int, pod *corev1.Pod) {
+			defer wg.Done()
+			snap := PodSnapshot{
+				Name:     pod.Name,
+				Phase:    string(pod.Status.Phase),
+				NodeName: pod.Spec.NodeName,
+			}
+
+			// Fetch logs for each container concurrently within the pod.
+			type containerResult struct {
+				cs   corev1.ContainerStatus
+				logs string
+			}
+			cResults := make(chan containerResult, len(pod.Status.ContainerStatuses))
+			var cwg sync.WaitGroup
+			for _, cs := range pod.Status.ContainerStatuses {
+				cs := cs
+				cwg.Add(1)
+				go func() {
+					defer cwg.Done()
+					logs, err := FetchContainerLogs(ctx, c.KubeClient, pod.Namespace, pod.Name, cs.Name)
+					if err != nil {
+						logs = fmt.Sprintf("[log unavailable: %v]", err)
+					}
+					cResults <- containerResult{cs: cs, logs: logs}
+				}()
+			}
+			cwg.Wait()
+			close(cResults)
+
+			for cr := range cResults {
+				snap.Containers = append(snap.Containers, ContainerSnapshot{
+					Name:         cr.cs.Name,
+					Image:        imageForContainer(pod, cr.cs.Name),
+					RestartCount: cr.cs.RestartCount,
+					State:        containerStateString(cr.cs),
+					LastLogs:     truncateLogs(cr.logs),
+				})
+			}
+
+			results <- indexedSnap{idx: idx, snap: snap}
+		}(i, pod)
+	}
+
+	wg.Wait()
+	close(results)
+
+	// Reassemble in original pod order.
+	snapshots := make([]PodSnapshot, len(pods))
+	for r := range results {
+		snapshots[r.idx] = r.snap
+	}
+	return snapshots
 }
 
 // containerStateString produces a compact state string for a ContainerStatus.
@@ -141,4 +204,15 @@ func imageForContainer(pod *corev1.Pod, containerName string) string {
 		}
 	}
 	return "unknown"
+}
+
+// truncateLogs caps log content at collection time to avoid holding large
+// strings in memory and to keep LLM prompt sizes predictable.
+const maxLogChars = 3000
+
+func truncateLogs(logs string) string {
+	if len(logs) <= maxLogChars {
+		return logs
+	}
+	return "...[truncated]...\n" + logs[len(logs)-maxLogChars:]
 }

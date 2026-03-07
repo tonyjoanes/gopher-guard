@@ -12,6 +12,8 @@ import (
 	"github.com/tonyjoanes/gopher-guard/internal/observability"
 )
 
+const llmTemperature = 0.3
+
 const groqAPIURL = "https://api.groq.com/openai/v1/chat/completions"
 
 // GroqClient calls the Groq inference API, which is OpenAI-compatible.
@@ -34,15 +36,7 @@ func NewGroqClient(model, apiKey string) *GroqClient {
 // Diagnose sends the observability context to Groq and parses the JSON response.
 // It retries once on transient failures before returning an error.
 func (g *GroqClient) Diagnose(ctx context.Context, obs *observability.ObservabilityContext) (*Diagnosis, error) {
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		d, err := g.diagnoseOnce(ctx, obs)
-		if err == nil {
-			return d, nil
-		}
-		lastErr = err
-	}
-	return nil, fmt.Errorf("groq diagnosis failed after 2 attempts: %w", lastErr)
+	return diagnoseWithRetry(ctx, obs, "groq", 2, g.diagnoseOnce)
 }
 
 // --- OpenAI-compatible request/response types ---
@@ -82,7 +76,7 @@ func (g *GroqClient) diagnoseOnce(ctx context.Context, obs *observability.Observ
 			{Role: "system", Content: SystemPrompt},
 			{Role: "user", Content: BuildUserPrompt(obs)},
 		},
-		Temperature:    0.3,
+		Temperature:    llmTemperature,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 	}
 

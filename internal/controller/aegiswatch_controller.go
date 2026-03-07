@@ -38,9 +38,17 @@ import (
 
 	opsv1alpha1 "github.com/tonyjoanes/gopher-guard/api/v1alpha1"
 	ggithub "github.com/tonyjoanes/gopher-guard/internal/github"
+	ggk8s "github.com/tonyjoanes/gopher-guard/internal/k8s"
 	"github.com/tonyjoanes/gopher-guard/internal/llm"
 	"github.com/tonyjoanes/gopher-guard/internal/notify"
 	"github.com/tonyjoanes/gopher-guard/internal/observability"
+)
+
+const (
+	// reasonCrashLoopBackOff is the Kubernetes container waiting reason for crash loops.
+	reasonCrashLoopBackOff = "CrashLoopBackOff"
+	// reasonOOMKilled is the Kubernetes termination reason for out-of-memory kills.
+	reasonOOMKilled = "OOMKilled"
 )
 
 const requeueInterval = 30 * time.Second
@@ -104,10 +112,7 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	)
 
 	// --- 2. Resolve target namespace + fetch Deployment ---
-	targetNS := watch.Spec.TargetRef.Namespace
-	if targetNS == "" {
-		targetNS = watch.Namespace
-	}
+	targetNS := resolveTargetNamespace(watch.Spec.TargetRef.Namespace, watch.Namespace)
 
 	var deployment appsv1.Deployment
 	deployKey := types.NamespacedName{Name: watch.Spec.TargetRef.Name, Namespace: targetNS}
@@ -195,15 +200,18 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	r.Recorder.Event(&watch, corev1.EventTypeNormal, "DiagnosisComplete",
 		fmt.Sprintf("AI diagnosis: %s", diagnosis.RootCause))
 
-	// --- 4d. Open GitHub PR ---
+	// --- 4d. Read git secret once (used by both PR creation and notification) ---
+	gitToken, webhookURL := r.readGitSecrets(ctx, &watch)
+
+	// --- 4e. Open GitHub PR ---
 	var prURL string
-	if err := r.maybeOpenPR(ctx, &watch, &deployment, diagnosis, targetNS, &prURL); err != nil {
+	if err := r.maybeOpenPR(ctx, &watch, &deployment, diagnosis, targetNS, gitToken, &prURL); err != nil {
 		// PR failure is non-fatal: log + notify but don't fail the reconcile.
 		logger.Error(err, "failed to create healing PR")
 		r.Recorder.Event(&watch, corev1.EventTypeWarning, "PRCreationFailed", err.Error())
 	}
 
-	// --- 4e. Update status ---
+	// --- 4f. Update status ---
 	diagSummary := fmt.Sprintf("%s\n\n💬 %s", diagnosis.RootCause, diagnosis.WittyLine)
 	if err := r.patchStatus(ctx, req, func(w *opsv1alpha1.AegisWatch) {
 		w.Status.Phase = opsv1alpha1.PhaseDegraded // stays until PR is merged
@@ -216,8 +224,8 @@ func (r *AegisWatchReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// --- 4f. Send webhook notification ---
-	if err := r.sendNotification(ctx, &watch, diagnosis, prURL, targetNS); err != nil {
+	// --- 4g. Send webhook notification ---
+	if err := r.sendNotification(ctx, &watch, diagnosis, prURL, targetNS, webhookURL); err != nil {
 		logger.Error(err, "webhook notification failed (non-fatal)")
 	}
 
@@ -265,6 +273,25 @@ func (r *AegisWatchReconciler) runDiagnosis(
 	return llmClient.Diagnose(ctx, obs)
 }
 
+// readGitSecrets reads the GitHub token and optional webhook URL from the
+// gitSecretRef Secret in a single API call each. Results are returned as plain
+// strings so callers never touch the Secret directly.
+func (r *AegisWatchReconciler) readGitSecrets(ctx context.Context, watch *opsv1alpha1.AegisWatch) (token, webhookURL string) {
+	if watch.Spec.GitSecretRef == "" {
+		return "", ""
+	}
+	t, err := ggk8s.ReadSecretKey(ctx, r.Client, watch.Namespace, watch.Spec.GitSecretRef, "token")
+	if err == nil {
+		token = t
+	}
+	// "webhookUrl" is optional — ignore errors.
+	u, err := ggk8s.ReadSecretKey(ctx, r.Client, watch.Namespace, watch.Spec.GitSecretRef, "webhookUrl")
+	if err == nil {
+		webhookURL = u
+	}
+	return token, webhookURL
+}
+
 // maybeOpenPR creates a GitHub PR if conditions are met.
 // prURL is set to the created PR URL on success.
 func (r *AegisWatchReconciler) maybeOpenPR(
@@ -272,7 +299,7 @@ func (r *AegisWatchReconciler) maybeOpenPR(
 	watch *opsv1alpha1.AegisWatch,
 	deployment *appsv1.Deployment,
 	diagnosis *llm.Diagnosis,
-	targetNS string,
+	targetNS, githubToken string,
 	prURL *string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -285,11 +312,8 @@ func (r *AegisWatchReconciler) maybeOpenPR(
 		logger.Info("LLM returned no YAML patch — skipping PR")
 		return nil
 	}
-
-	// Read GitHub token from K8s Secret.
-	githubToken, err := readSecretKey(ctx, r.Client, watch.Namespace, watch.Spec.GitSecretRef, "token")
-	if err != nil {
-		return fmt.Errorf("reading GitHub token from secret %q: %w", watch.Spec.GitSecretRef, err)
+	if githubToken == "" {
+		return fmt.Errorf("GitHub token unavailable (check secret %q)", watch.Spec.GitSecretRef)
 	}
 
 	owner, repo, err := ggithub.SplitRepo(watch.Spec.GitRepo)
@@ -297,7 +321,7 @@ func (r *AegisWatchReconciler) maybeOpenPR(
 		return err
 	}
 
-	ghClient := ggithub.NewGitHubPRClient(githubToken)
+	ghClient := ggithub.NewGitHubPRClient(ctx, githubToken)
 	result, err := ghClient.CreateHealingPR(ctx, ggithub.PRRequest{
 		Owner:          owner,
 		Repo:           repo,
@@ -317,23 +341,13 @@ func (r *AegisWatchReconciler) maybeOpenPR(
 	return nil
 }
 
-// sendNotification fires a Slack/Discord webhook if a secret ref is configured.
-// We reuse the gitSecretRef secret and look for an optional "webhookUrl" key.
+// sendNotification fires a Slack/Discord webhook if webhookURL is non-empty.
 func (r *AegisWatchReconciler) sendNotification(
 	ctx context.Context,
 	watch *opsv1alpha1.AegisWatch,
 	diagnosis *llm.Diagnosis,
-	prURL, targetNS string,
+	prURL, targetNS, webhookURL string,
 ) error {
-	webhookURL := ""
-	if watch.Spec.GitSecretRef != "" {
-		// Best-effort: if the secret has a "webhookUrl" key, use it.
-		u, err := readSecretKey(ctx, r.Client, watch.Namespace, watch.Spec.GitSecretRef, "webhookUrl")
-		if err == nil {
-			webhookURL = u
-		}
-	}
-
 	notifier := notify.NewNotificationClient(webhookURL)
 	return notifier.SendHealingUpdate(ctx, notify.HealingUpdate{
 		DeploymentName: watch.Spec.TargetRef.Name,
@@ -345,20 +359,12 @@ func (r *AegisWatchReconciler) sendNotification(
 	})
 }
 
-// readSecretKey fetches one value from a Kubernetes Secret by key name.
-func readSecretKey(ctx context.Context, c client.Client, namespace, secretName, key string) (string, error) {
-	if secretName == "" {
-		return "", fmt.Errorf("secret name is empty")
+// resolveTargetNamespace returns targetNS if non-empty, otherwise falls back to defaultNS.
+func resolveTargetNamespace(targetNS, defaultNS string) string {
+	if targetNS != "" {
+		return targetNS
 	}
-	var secret corev1.Secret
-	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: secretName}, &secret); err != nil {
-		return "", fmt.Errorf("get secret %s/%s: %w", namespace, secretName, err)
-	}
-	val, ok := secret.Data[key]
-	if !ok {
-		return "", fmt.Errorf("secret %s/%s has no key %q", namespace, secretName, key)
-	}
-	return string(val), nil
+	return defaultNS
 }
 
 // detectAnomaly scans pods for known failure conditions.
@@ -391,14 +397,14 @@ func detectAnomaly(
 				), nil
 			}
 			if w := cs.State.Waiting; w != nil {
-				if w.Reason == "CrashLoopBackOff" || w.Reason == "OOMKilled" {
+				if w.Reason == reasonCrashLoopBackOff || w.Reason == reasonOOMKilled {
 					return true, fmt.Sprintf(
 						"pod %s/%s container %q is in %s",
 						pod.Namespace, pod.Name, cs.Name, w.Reason,
 					), nil
 				}
 			}
-			if t := cs.LastTerminationState.Terminated; t != nil && t.Reason == "OOMKilled" {
+			if t := cs.LastTerminationState.Terminated; t != nil && t.Reason == reasonOOMKilled {
 				return true, fmt.Sprintf(
 					"pod %s/%s container %q was OOMKilled",
 					pod.Namespace, pod.Name, cs.Name,
@@ -445,11 +451,7 @@ func (r *AegisWatchReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		var requests []reconcile.Request
 		for _, aw := range watchList.Items {
-			targetNS := aw.Spec.TargetRef.Namespace
-			if targetNS == "" {
-				targetNS = aw.Namespace
-			}
-			if targetNS == pod.Namespace {
+			if resolveTargetNamespace(aw.Spec.TargetRef.Namespace, aw.Namespace) == pod.Namespace {
 				requests = append(requests, reconcile.Request{
 					NamespacedName: types.NamespacedName{
 						Namespace: aw.Namespace,

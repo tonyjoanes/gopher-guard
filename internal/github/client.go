@@ -69,10 +69,11 @@ type GitHubPRClient struct {
 }
 
 // NewGitHubPRClient creates an authenticated GitHub client using a personal
-// access token or GitHub App installation token.
-func NewGitHubPRClient(token string) *GitHubPRClient {
+// access token or GitHub App installation token. The provided context is used
+// for the OAuth2 token transport so cancellation propagates correctly.
+func NewGitHubPRClient(ctx context.Context, token string) *GitHubPRClient {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	tc := oauth2.NewClient(context.Background(), ts)
+	tc := oauth2.NewClient(ctx, ts)
 	return &GitHubPRClient{gh: gogithub.NewClient(tc)}
 }
 

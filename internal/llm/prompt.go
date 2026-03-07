@@ -66,7 +66,7 @@ func BuildUserPrompt(obs *observability.ObservabilityContext) string {
 			fmt.Fprintf(&sb, "- State: `%s`\n", c.State)
 			fmt.Fprintf(&sb, "- Restart count: %d\n", c.RestartCount)
 			if c.LastLogs != "" {
-				fmt.Fprintf(&sb, "\n**Recent logs (last 50 lines)**:\n```\n%s\n```\n", trimLogs(c.LastLogs, 3000))
+				fmt.Fprintf(&sb, "\n**Recent logs (last 50 lines)**:\n```\n%s\n```\n", c.LastLogs)
 			}
 		}
 	}
@@ -96,11 +96,3 @@ func BuildUserPrompt(obs *observability.ObservabilityContext) string {
 	return sb.String()
 }
 
-// trimLogs caps log content to maxChars to stay within LLM context limits.
-func trimLogs(logs string, maxChars int) string {
-	if len(logs) <= maxChars {
-		return logs
-	}
-	// Keep the tail — the most recent lines are most useful.
-	return "...[truncated]...\n" + logs[len(logs)-maxChars:]
-}

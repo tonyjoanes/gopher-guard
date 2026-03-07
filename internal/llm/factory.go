@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	opsv1alpha1 "github.com/tonyjoanes/gopher-guard/api/v1alpha1"
+	ggk8s "github.com/tonyjoanes/gopher-guard/internal/k8s"
 )
 
 // NewFromSpec builds the appropriate LLMClient for the given AegisWatch spec.
@@ -32,7 +31,7 @@ func NewFromSpec(
 
 	switch spec.LLMProvider {
 	case opsv1alpha1.LLMProviderGroq, opsv1alpha1.LLMProviderOpenAI:
-		apiKey, err := readSecretKey(ctx, c, aw.Namespace, spec.LLMSecretRef, "apiKey")
+		apiKey, err := ggk8s.ReadSecretKey(ctx, c, aw.Namespace, spec.LLMSecretRef, "apiKey")
 		if err != nil {
 			return nil, fmt.Errorf("reading LLM API key secret %q: %w", spec.LLMSecretRef, err)
 		}
@@ -44,7 +43,7 @@ func NewFromSpec(
 		baseURL := ""
 		// Optional: allow overriding the Ollama URL via a secret key "baseUrl".
 		if spec.LLMSecretRef != "" {
-			u, err := readSecretKey(ctx, c, aw.Namespace, spec.LLMSecretRef, "baseUrl")
+			u, err := ggk8s.ReadSecretKey(ctx, c, aw.Namespace, spec.LLMSecretRef, "baseUrl")
 			if err == nil {
 				baseURL = u
 			}
@@ -71,23 +70,3 @@ func defaultModelFor(provider opsv1alpha1.LLMProvider) string {
 	}
 }
 
-// readSecretKey fetches a single string value from a Kubernetes Secret.
-func readSecretKey(ctx context.Context, c client.Client, namespace, secretName, key string) (string, error) {
-	if secretName == "" {
-		return "", fmt.Errorf("secret name is empty")
-	}
-
-	var secret corev1.Secret
-	if err := c.Get(ctx, types.NamespacedName{
-		Namespace: namespace,
-		Name:      secretName,
-	}, &secret); err != nil {
-		return "", fmt.Errorf("get secret %s/%s: %w", namespace, secretName, err)
-	}
-
-	val, ok := secret.Data[key]
-	if !ok {
-		return "", fmt.Errorf("secret %s/%s has no key %q", namespace, secretName, key)
-	}
-	return string(val), nil
-}

@@ -39,15 +39,7 @@ func NewOllamaClient(model, baseURL string) *OllamaClient {
 // Diagnose sends the observability context to Ollama and parses the response.
 // Retries once on transient failure.
 func (o *OllamaClient) Diagnose(ctx context.Context, obs *observability.ObservabilityContext) (*Diagnosis, error) {
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		d, err := o.diagnoseOnce(ctx, obs)
-		if err == nil {
-			return d, nil
-		}
-		lastErr = err
-	}
-	return nil, fmt.Errorf("ollama diagnosis failed after 2 attempts: %w", lastErr)
+	return diagnoseWithRetry(ctx, obs, "ollama", 2, o.diagnoseOnce)
 }
 
 // --- Ollama /api/chat request/response types ---
@@ -81,7 +73,7 @@ func (o *OllamaClient) diagnoseOnce(ctx context.Context, obs *observability.Obse
 		Stream: false,
 		Format: "json",
 		Options: ollamaOptions{
-			Temperature: 0.3,
+			Temperature: llmTemperature,
 		},
 	}
 
