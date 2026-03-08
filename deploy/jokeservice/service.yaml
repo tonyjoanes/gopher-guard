@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: jokeservice
+  namespace: demo
+  labels:
+    app: jokeservice
+spec:
+  selector:
+    app: jokeservice
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP

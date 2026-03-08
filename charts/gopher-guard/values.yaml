@@ -1,0 +1,75 @@
+# Default values for gopher-guard.
+
+image:
+  repository: ghcr.io/tonyjoanes/gopher-guard
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+# Number of operator replicas. 2 is recommended for HA with leader election.
+replicaCount: 2
+
+# Resource limits/requests for the operator pod.
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# Service account used by the operator.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Pod security context.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# Node selector, tolerations, affinity.
+nodeSelector: {}
+tolerations: []
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gopher-guard
+          topologyKey: kubernetes.io/hostname
+
+# Metrics server configuration.
+metrics:
+  enabled: true
+  # Set to false to serve metrics over plain HTTP (not recommended for production).
+  secure: true
+  port: 8443
+
+# Health probe port.
+healthProbePort: 8081
+
+# Enable leader election (required when replicaCount > 1).
+leaderElection: true
+
+# Optional: URL of Prometheus server for workload metrics collection.
+# Leave empty to disable Prometheus integration.
+prometheusURL: ""
+
+# CRD installation. Set to false if you manage CRDs separately.
+installCRDs: true
+
+# RBAC. Set to false if your cluster restricts ClusterRole creation.
+rbac:
+  create: true

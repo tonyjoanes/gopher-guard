@@ -1,0 +1,42 @@
+# Sample AegisWatch CR — tells GopherGuard to watch the jokeservice Deployment.
+#
+# Prerequisites:
+#   1. CRD installed:  make install
+#   2. JokeService deployed in the demo namespace
+#   3. Kubernetes Secret "github-token" exists in the gopherguard-system namespace
+#      with key "token" set to a GitHub PAT (repo + pull_request scopes)
+#   4. Kubernetes Secret "groq-api-key" exists in the same namespace
+#      with key "apiKey" set to your Groq API key (free at console.groq.com)
+#
+# Apply:
+#   kubectl apply -f config/samples/ops_v1alpha1_aegiswatch.yaml
+apiVersion: ops.gopherguard.dev/v1alpha1
+kind: AegisWatch
+metadata:
+  name: jokeservice-watcher
+  namespace: gopherguard-system
+  labels:
+    app.kubernetes.io/name: gopher-guard
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The Deployment to monitor (in the demo namespace).
+  targetRef:
+    name: jokeservice
+    namespace: demo
+
+  # LLM settings — uses Groq (free, fast).
+  # Switch to llmProvider: ollama for fully offline operation.
+  llmProvider: groq
+  llmModel: llama3-70b-8192
+  llmSecretRef: groq-api-key
+
+  # GitHub repo where GopherGuard opens healing PRs.
+  # TODO: replace with your fork.
+  gitRepo: tonyjoanes/gopher-guard
+  gitSecretRef: github-token
+
+  # safeMode: true  ← uncomment to disable auto-PR (log-only mode).
+  safeMode: false
+
+  # Alert after 3 container restarts.
+  restartThreshold: 3

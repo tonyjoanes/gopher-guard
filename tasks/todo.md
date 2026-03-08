@@ -19,31 +19,25 @@
 - [ ] Confirm GitOps controller is syncing the repo
 
 ### 1.3 JokeService demo app
-- [ ] Write a minimal Go HTTP server (`cmd/jokeservice/main.go`) that:
+- [x] Write a minimal Go HTTP server (`cmd/jokeservice/main.go`) that:
   - Randomly returns HTTP 500 (`~20% of requests`)
   - Randomly panics / OOMs to simulate a crash loop
-- [ ] Write `Dockerfile` for JokeService
-- [ ] Write Kubernetes manifests: `Deployment`, `Service` under `deploy/jokeservice/`
-- [ ] Add ArgoCD `Application` (or Flux `Kustomization`) YAML to sync JokeService from Git
-- [ ] Deploy JokeService via GitOps and confirm crash-looping
+- [x] Write `Dockerfile` for JokeService (`deploy/jokeservice/Dockerfile`)
+- [x] Write Kubernetes manifests: `Deployment`, `Service` under `deploy/jokeservice/`
+- [x] Add ArgoCD `Application` YAML to sync JokeService from Git (`deploy/argocd/jokeservice-app.yaml`)
+- [ ] **[YOU]** Build & push image: `docker build -f deploy/jokeservice/Dockerfile -t ghcr.io/<you>/jokeservice:latest . && docker push`
+- [ ] **[YOU]** Deploy JokeService via GitOps: `kubectl apply -f deploy/argocd/jokeservice-app.yaml`
+- [ ] **[YOU]** Confirm crash-looping: `kubectl get pods -n demo -w`
 
 ### 1.4 Operator skeleton (Kubebuilder)
-- [ ] Run `kubebuilder init --domain gopherguard.dev --repo github.com/<you>/gopher-guard`
-- [ ] Run `kubebuilder create api --group ops --version v1alpha1 --kind AegisWatch`
-- [ ] Define `AegisWatchSpec` fields:
-  - `targetRef` (name/namespace of Deployment to watch)
-  - `llmProvider` (groq | ollama | openai)
-  - `llmModel` (e.g. `llama3-70b-8192`)
-  - `gitRepo` (owner/repo for PRs)
-  - `safeMode` (bool — suggest only, no auto-PR)
-- [ ] Define `AegisWatchStatus` fields:
-  - `phase` (Watching | Degraded | Healing | Healthy)
-  - `lastDiagnosis` (string)
-  - `lastPRUrl` (string)
-  - `healingScore` (int)
-- [ ] `make generate && make manifests` — generate CRD YAML
-- [ ] Write basic reconciler stub that logs "I see you, JokeService" on CR creation
-- [ ] `make install && make run` — confirm operator reacts to `AegisWatch` CR
+- [x] Run `kubebuilder init --domain gopherguard.dev --repo github.com/tonyjoanes/gopher-guard`
+- [x] Run `kubebuilder create api --group ops --version v1alpha1 --kind AegisWatch`
+- [x] Define `AegisWatchSpec` fields (targetRef, llmProvider, llmModel, gitRepo, safeMode, restartThreshold)
+- [x] Define `AegisWatchStatus` fields (phase, lastDiagnosis, lastPRUrl, healingScore, lastAnomalyTime, conditions)
+- [x] `make generate && make manifests` — CRD YAML generated
+- [x] Write reconciler with anomaly detection (CrashLoopBackOff, OOMKilled, restart threshold, unavailable replicas)
+- [ ] **[YOU]** `make install` — install CRDs into your kind cluster
+- [ ] **[YOU]** `make run` — run the operator locally and apply `config/samples/ops_v1alpha1_aegiswatch.yaml`
 
 **Milestone 1**: Operator prints event in real-time when CR appears. ✓
 
@@ -52,25 +46,26 @@
 ## Phase 2 — Kubernetes Observability
 
 ### 2.1 Watch Pods & Deployments
-- [ ] Add lister/watcher for `Pods` and `Deployments` in reconciler using `controller-runtime` client
-- [ ] Detect unhealthy conditions:
-  - `CrashLoopBackOff`
-  - `OOMKilled`
-  - Repeated restarts (restart count > threshold, e.g. 3)
-  - Deployment unavailable replicas > 0 for > N seconds
-- [ ] Emit Kubernetes `Event` on the `AegisWatch` CR when anomaly detected
-- [ ] Update `AegisWatchStatus.phase` to `Degraded`
+- [x] Add `Watches(&corev1.Pod{}, ...)` in `SetupWithManager` — pod changes trigger reconcile
+- [x] Detect unhealthy conditions:
+  - `CrashLoopBackOff` (waiting state)
+  - `OOMKilled` (waiting + last-terminated state)
+  - Repeated restarts (restart count ≥ threshold)
+  - Deployment `unavailableReplicas > 0`
+- [x] Emit Kubernetes `Warning` Event on the `AegisWatch` CR when anomaly detected
+- [x] Update `AegisWatchStatus.phase` to `Degraded`; record `lastAnomalyTime`
 
 ### 2.2 Log & event collection
-- [ ] Fetch last N lines of logs from the crashing container via `core/v1` client (`PodLogOptions`)
-- [ ] Fetch recent Kubernetes events for the Deployment namespace (`EventList`)
-- [ ] Package logs + events into a structured `ObservabilityContext` Go struct
+- [x] Fetch last 50 lines of logs per container via raw `kubernetes.Clientset` (`PodLogOptions`) — with previous-container fallback (`internal/observability/logs.go`)
+- [x] Fetch recent Kubernetes Warning events for the Deployment namespace, filtered by involved object names (`internal/observability/events.go`)
+- [x] Package logs + events into structured `ObservabilityContext` Go struct (`internal/observability/context.go`)
+- [x] `Collector.Collect()` orchestrates all sources into one context (`internal/observability/collector.go`)
 
-### 2.3 Prometheus metrics (optional but recommended)
-- [ ] Add `prometheus/client_golang` dependency
-- [ ] Query Prometheus for CPU/memory usage of the target pod (via HTTP API)
-- [ ] Attach metrics snapshot to `ObservabilityContext`
-- [ ] Expose operator's own metrics endpoint (`/metrics`) via `controller-runtime`
+### 2.3 Prometheus metrics
+- [x] Prometheus HTTP query client (`internal/observability/prometheus.go`) — queries CPU (millicores) and memory (MiB) via instant query API
+- [x] Metrics snapshot attached to `ObservabilityContext.Metrics`
+- [x] Disabled gracefully when `--prometheus-url` flag is empty
+- [x] Operator's own `/metrics` endpoint exposed via `controller-runtime` (kubebuilder default)
 
 **Milestone 2**: Operator prints "Houston, we have a crashing pod" with full logs + event context. ✓
 
@@ -79,35 +74,24 @@
 ## Phase 3 — AIOps / LLM Integration
 
 ### 3.1 LLM client abstraction
-- [ ] Define `LLMClient` interface:
-  ```go
-  type LLMClient interface {
-      Diagnose(ctx context.Context, obs ObservabilityContext) (Diagnosis, error)
-  }
-  ```
-- [ ] Implement `GroqClient` (OpenAI-compatible REST, `net/http`)
-- [ ] Implement `OllamaClient` (local, `net/http` to `localhost:11434`)
-- [ ] Wire provider selection from `AegisWatchSpec.llmProvider`
+- [x] Define `LLMClient` interface (`internal/llm/client.go`) + `Diagnosis` struct (`RootCause`, `YAMLPatch`, `WittyLine`)
+- [x] Implement `GroqClient` — OpenAI-compatible REST (`internal/llm/groq.go`), `json_object` response format, 60s timeout, 2-attempt retry
+- [x] Implement `OllamaClient` — Ollama `/api/chat` with `format: json` (`internal/llm/ollama.go`), 3-min timeout for slow local models
+- [x] `NewFromSpec()` factory (`internal/llm/factory.go`) — reads API key from K8s Secret, selects provider from `spec.llmProvider`, defaults model per provider
 
 ### 3.2 Prompt engineering
-- [ ] Write system prompt that instructs LLM to:
-  - Return structured JSON: `{ "rootCause": "...", "patch": "...yaml...", "wittyLine": "..." }`
-  - Keep YAML patch minimal and safe (no image tag changes without explicit permission)
-- [ ] Build user prompt from `ObservabilityContext`: include resource YAML, logs, events, metrics
-- [ ] Parse and validate LLM JSON response into `Diagnosis` struct:
-  ```go
-  type Diagnosis struct {
-      RootCause string
-      YAMLPatch string
-      WittyLine string
-  }
-  ```
-- [ ] Handle LLM errors gracefully (retry once, then update status with error)
+- [x] System prompt (`internal/llm/prompt.go`): strict JSON schema, patch rules (no image changes, only resources/env/probes/replicas), witty line constraints
+- [x] `BuildUserPrompt()`: structured markdown with deployment metadata, Prometheus metrics, per-pod/container state, log tails (capped at 3000 chars), K8s events table
+- [x] `parseDiagnosis()`: JSON unmarshal → `Diagnosis`; validates non-empty `rootCause`
+- [x] Retry once on transient LLM failure; error stored as K8s Event on CR
 
 ### 3.3 Reconciler integration
-- [ ] Call LLM when `phase == Degraded`
-- [ ] Store `Diagnosis.RootCause` + `Diagnosis.WittyLine` in `AegisWatchStatus.lastDiagnosis`
-- [ ] Log witty line to operator stdout with a gopher ASCII art prefix
+- [x] Phase transitions: Degraded → **Healing** (before LLM call) → Degraded (after, until Phase 4 PR merge)
+- [x] `runDiagnosis()` builds LLM client per-reconcile from live CR spec + secret
+- [x] `lastDiagnosis` in status: `"<rootCause>\n\n💬 <wittyLine>"`
+- [x] K8s Event `DiagnosisComplete` emitted on success; `DiagnosisFailed` on error
+- [x] Gopher ASCII art + root cause + witty line + patch indicator logged to stdout
+- [x] `_ = diagnosis.YAMLPatch` Phase 4 hook ready for PR creation
 
 **Milestone 3**: Operator outputs "AI says: add memory limit 256Mi — *This pod crashed harder than my hopes for Monday.*" ✓
 
@@ -116,24 +100,26 @@
 ## Phase 4 — GitOps Loop (Auto-PR)
 
 ### 4.1 GitHub PR creation
-- [ ] Add `github.com/google/go-github/v62` dependency
-- [ ] Implement `GitHubPRClient`:
-  - Clone/read current file from repo via GitHub API (avoid full git clone)
-  - Apply YAML patch (merge strategy: strategic merge or JSON patch)
-  - Create branch `gopherguard/fix-<resource>-<timestamp>`
-  - Commit patched file
-  - Open PR with title: "fix(<resource>): AI-suggested remediation" and body including `WittyLine` + `RootCause`
-- [ ] Store PR URL in `AegisWatchStatus.lastPRUrl`
-- [ ] Guard behind `AegisWatchSpec.safeMode` flag (log-only when `true`)
+- [x] Add `github.com/google/go-github/v62` dependency
+- [x] `GitHubPRClient` (`internal/github/client.go`):
+  - Searches conventional paths (`deploy/<name>/deployment.yaml`, `manifests/<name>.yaml`, etc.)
+  - Reads file via GitHub Contents API (no git clone needed)
+  - `ApplyYAMLPatch()` — strategic merge patch via `k8s.io/apimachinery/pkg/util/strategicpatch` (`internal/github/patch.go`)
+  - Creates branch `gopherguard/fix-<deployment>-<unix-ts>`
+  - Commits patched file with structured message
+  - Opens PR: title `fix(<deployment>): AI-suggested remediation [GopherGuard #N]`, body with root cause + YAML diff + witty line
+- [x] `lastPRUrl` stored in `AegisWatchStatus` after each successful PR
+- [x] `safeMode: true` skips PR entirely — logs diagnosis only
 
-### 4.2 Slack/Discord webhook (optional)
-- [ ] Write `NotificationClient` with a `SendHealingUpdate(Diagnosis, PRUrl)` method
-- [ ] Format message with emoji, witty line, and PR link
-- [ ] Read webhook URL from Kubernetes `Secret` (never hardcode)
+### 4.2 Slack/Discord webhook
+- [x] `NotificationClient` (`internal/notify/webhook.go`) — auto-detects Slack vs Discord from URL
+- [x] Slack: Block Kit payload with header, details, PR link sections
+- [x] Discord: Embed with colour (green=success, yellow=safeMode), fields, footer
+- [x] Webhook URL read from optional `"webhookUrl"` key in the `gitSecretRef` Secret (zero config when absent)
 
 ### 4.3 Healing score
-- [ ] Increment `AegisWatchStatus.healingScore` after each successful PR
-- [ ] Reset or flag when pod stays crashlooping after N PRs (avoid infinite loop)
+- [x] `healingScore` incremented in status after each successful PR creation
+- [x] Anti-loop guard: `MaxHealingAttempts = 5` — if score ≥ cap, emits `HealingCapReached` Warning Event and skips LLM/PR; requires manual intervention
 
 **Milestone 4**: Trigger chaos → PR appears automatically in GitHub → merge → ArgoCD/Flux applies fix → pod healthy. Record the 60-second demo. ✓
 
@@ -202,10 +188,10 @@
 
 | Phase | Status |
 |-------|--------|
-| 1 — Foundation | ⬜ Not started |
-| 2 — Observability | ⬜ Not started |
-| 3 — LLM Integration | ⬜ Not started |
-| 4 — GitOps Loop / Auto-PR | ⬜ Not started |
+| 1 — Foundation | ✅ Done |
+| 2 — Observability | ✅ Done |
+| 3 — LLM Integration | ✅ Done |
+| 4 — GitOps Loop / Auto-PR | ✅ Done |
 | 5 — Self-managed via GitOps | ⬜ Not started |
 | 6 — HTMX Dashboard | ⬜ Not started |
 | 7 — Polish & Extensions | ⬜ Not started |
