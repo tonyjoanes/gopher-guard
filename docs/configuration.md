@@ -6,9 +6,8 @@
 |-------|------|---------|----------|-------------|
 | `spec.targetRef.name` | string | — | ✅ | Name of the Deployment to watch |
 | `spec.targetRef.namespace` | string | CR namespace | | Namespace of the Deployment (defaults to AegisWatch namespace) |
-| `spec.llmProvider` | enum | `groq` | | LLM backend: `groq`, `ollama`, `openai` |
-| `spec.llmModel` | string | provider default | | Model identifier (e.g. `llama3-70b-8192`) |
-| `spec.llmSecretRef` | string | — | (Groq/OpenAI) | Secret name containing `apiKey`. For Ollama: optional `baseUrl` |
+| `spec.llmModel` | string | `claude-haiku-4-5-20251001` | | Anthropic model identifier |
+| `spec.llmSecretRef` | string | — | ✅ | Secret name containing `apiKey` (Anthropic API key) |
 | `spec.gitRepo` | string | — | ✅ | `"owner/repo"` — GitHub repo to open PRs against |
 | `spec.gitSecretRef` | string | — | ✅ | Secret name with `token` key (GitHub PAT). Optional `webhookUrl` for Slack/Discord |
 | `spec.safeMode` | bool | `false` | | When `true`, GopherGuard logs diagnosis but does NOT open PRs |
@@ -41,27 +40,13 @@ Key values (see `charts/gopher-guard/values.yaml` for the full list):
 | `resources.limits.memory` | `128Mi` | Operator memory limit |
 | `installCRDs` | `true` | Install CRDs automatically |
 
-## LLM providers
+## LLM provider
 
-### Groq (recommended for demos)
-- Free tier: `llama3-70b-8192`, `mixtral-8x7b-32768`
-- Secret key: `apiKey`
-- Sign up at [groq.com](https://groq.com)
+GopherGuard uses Anthropic (Claude) for diagnosis.
 
-### Ollama (air-gapped / offline)
-- No API key required
-- Default URL: `http://localhost:11434`
-- Override: set `baseUrl` in the secret referenced by `llmSecretRef`
-- Install: `ollama pull llama3`
-
-### OpenAI
-- Secret key: `apiKey`
-- Default model: `gpt-4o-mini`
-
-### Anthropic
-- Secret key: `apiKey` (your Anthropic API key from console.anthropic.com)
 - Default model: `claude-haiku-4-5-20251001`
-- Recommended for best diagnosis quality: `claude-sonnet-4-6`
+- Recommended for best quality: `claude-sonnet-4-6`
+- Get an API key at [console.anthropic.com](https://console.anthropic.com)
 
 ```bash
 kubectl create secret generic anthropic-api-key \
@@ -71,7 +56,6 @@ kubectl create secret generic anthropic-api-key \
 
 Example AegisWatch spec:
 ```yaml
-llmProvider: anthropic
 llmModel: claude-haiku-4-5-20251001
 llmSecretRef: anthropic-api-key
 ```

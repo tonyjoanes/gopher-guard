@@ -66,24 +66,14 @@ spec:
                   under the key "token".
                 type: string
               llmModel:
-                default: llama3-70b-8192
                 description: |-
-                  LLMModel is the model identifier sent to the LLM provider.
-                  e.g. "llama3-70b-8192" for Groq, "llama3" for Ollama.
-                type: string
-              llmProvider:
-                default: groq
-                description: LLMProvider selects which LLM backend to use for diagnosis.
-                enum:
-                - groq
-                - ollama
-                - openai
-                - anthropic
+                  LLMModel is the model identifier sent to Anthropic.
+                  Defaults to "claude-haiku-4-5-20251001".
                 type: string
               llmSecretRef:
                 description: |-
-                  LLMSecretRef names a Kubernetes Secret that contains the LLM API key
-                  under the key "apiKey". Not required for Ollama.
+                  LLMSecretRef names a Kubernetes Secret that contains the Anthropic API key
+                  under the key "apiKey".
                 type: string
               restartThreshold:
                 default: 3
@@ -116,6 +106,7 @@ spec:
             required:
             - gitRepo
             - gitSecretRef
+            - llmSecretRef
             - targetRef
             type: object
           status:

@@ -18,7 +18,7 @@ A lightweight Kubernetes Operator written in Go that watches your GitOps-managed
 
 ### Tech Stack (All 2026-current & resume-friendly)
 - **Go 1.23+** + `controller-runtime` + Kubebuilder (official way to build operators)
-- **LLM integration**: Groq (free/fast Llama-3/Gemma), Ollama (local & private), or Grok/OpenAI-compatible client (tiny `net/http` wrapper or langchaingo)
+- **LLM integration**: Anthropic Claude via the Messages API (tiny `net/http` wrapper)
 - **GitOps**: ArgoCD (easier UI) *or* Flux v2 — your choice. Operator creates PRs using `github.com/google/go-github`
 - **Observability**: Prometheus client-go + Kubernetes events/logs
 - **UI (optional but fun)**: Echo/Fiber + HTMX for zero-JS dashboard
@@ -73,11 +73,11 @@ GopherGuard Operator (running in cluster)
 - Support *both* ArgoCD and Flux (watch different CRs).
 - Add “safe mode” (only suggest, never auto-PR).
 - Multi-cluster (via ArgoCD ApplicationSets).
-- Bonus: Integrate K8sGPT or local Ollama for fully offline mode.
+- Bonus: Add safe-mode-only dry-run reporting dashboard.
 
 ### Resources to Get You Unstuck Fast
 - **Operator core**: Kubebuilder book (free, updated 2025) + controller-runtime examples on GitHub.
-- **LLM in Go**: Search “ollama go client” or use Groq’s OpenAI-compatible endpoint — 20 lines of code.
+- **LLM in Go**: Anthropic Messages API docs + `net/http` — straightforward REST calls.
 - **Git PRs**: Official go-github examples.
 - **Inspiration**: Clone https://github.com/holynakamoto/prophet (real AIOps Go operators with ArgoCD self-healing — study the `operators/` folder).
 - **Chaos demo**: chaos-mesh quickstart or just `kubectl exec` to kill pods.

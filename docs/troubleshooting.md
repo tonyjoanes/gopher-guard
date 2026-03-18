@@ -24,8 +24,8 @@ Common causes:
 ## LLM returns empty response
 
 - Verify the API key is correct: `kubectl get secret <llmSecretRef> -o yaml`
-- For Groq: check usage limits at groq.com
-- For Ollama: ensure the model is pulled (`ollama pull llama3`) and the server is reachable
+- Check Anthropic API status at [status.anthropic.com](https://status.anthropic.com)
+- Ensure the secret key is named `apiKey` (not `api_key` or `ANTHROPIC_API_KEY`)
 
 ## Pod not triggering reconciliation
 

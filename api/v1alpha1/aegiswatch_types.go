@@ -20,17 +20,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// LLMProvider enumerates the supported LLM backends.
-// +kubebuilder:validation:Enum=groq;ollama;openai;anthropic
-type LLMProvider string
-
-const (
-	LLMProviderGroq      LLMProvider = "groq"
-	LLMProviderOllama    LLMProvider = "ollama"
-	LLMProviderOpenAI    LLMProvider = "openai"
-	LLMProviderAnthropic LLMProvider = "anthropic"
-)
-
 // AegisWatchPhase represents the current state of healing activity.
 // +kubebuilder:validation:Enum=Watching;Degraded;Healing;Healthy
 type AegisWatchPhase string
@@ -59,19 +48,15 @@ type AegisWatchSpec struct {
 	// +kubebuilder:validation:Required
 	TargetRef TargetRef `json:"targetRef"`
 
-	// LLMProvider selects which LLM backend to use for diagnosis.
-	// +kubebuilder:default=groq
-	LLMProvider LLMProvider `json:"llmProvider,omitempty"`
-
-	// LLMModel is the model identifier sent to the LLM provider.
-	// e.g. "llama3-70b-8192" for Groq, "llama3" for Ollama.
-	// +kubebuilder:default="llama3-70b-8192"
+	// LLMModel is the model identifier sent to Anthropic.
+	// Defaults to "claude-haiku-4-5-20251001".
+	// +optional
 	LLMModel string `json:"llmModel,omitempty"`
 
-	// LLMSecretRef names a Kubernetes Secret that contains the LLM API key
-	// under the key "apiKey". Not required for Ollama.
-	// +optional
-	LLMSecretRef string `json:"llmSecretRef,omitempty"`
+	// LLMSecretRef names a Kubernetes Secret that contains the Anthropic API key
+	// under the key "apiKey".
+	// +kubebuilder:validation:Required
+	LLMSecretRef string `json:"llmSecretRef"`
 
 	// GitRepo is the "owner/repo" string for the GitHub repository where
 	// GopherGuard will open pull requests with YAML patches.

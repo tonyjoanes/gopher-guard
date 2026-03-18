@@ -294,7 +294,7 @@ func (r *AegisWatchReconciler) runDiagnosis(
 	if err != nil {
 		return nil, fmt.Errorf("building LLM client: %w", err)
 	}
-	provider := string(watch.Spec.LLMProvider)
+	provider := "anthropic"
 	start := time.Now()
 	d, err := llmClient.Diagnose(ctx, obs)
 	result := "success"
