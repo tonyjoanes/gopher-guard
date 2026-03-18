@@ -23,9 +23,9 @@ spec:
         - name: ERROR_RATE
           value: "0.20"
         - name: PANIC_RATE
-          value: "1.0"
+          value: "0"
         - name: OOM_RATE
-          value: "0.02"
+          value: "0"
         image: ghcr.io/tonyjoanes/jokeservice:latest
         imagePullPolicy: Always
         livenessProbe:
