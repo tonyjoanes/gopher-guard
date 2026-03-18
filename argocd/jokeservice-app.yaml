@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jokeservice
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/tonyjoanes/gopher-guard
+    targetRevision: main
+    path: deploy/jokeservice
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      # selfHeal is intentionally false: GopherGuard drives healing by opening PRs.
+      # ArgoCD only applies changes when a healing PR is merged to main.
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true

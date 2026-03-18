@@ -58,6 +58,24 @@ Key values (see `charts/gopher-guard/values.yaml` for the full list):
 - Secret key: `apiKey`
 - Default model: `gpt-4o-mini`
 
+### Anthropic
+- Secret key: `apiKey` (your Anthropic API key from console.anthropic.com)
+- Default model: `claude-haiku-4-5-20251001`
+- Recommended for best diagnosis quality: `claude-sonnet-4-6`
+
+```bash
+kubectl create secret generic anthropic-api-key \
+  --from-literal=apiKey=sk-ant-... \
+  -n gopher-guard-system
+```
+
+Example AegisWatch spec:
+```yaml
+llmProvider: anthropic
+llmModel: claude-haiku-4-5-20251001
+llmSecretRef: anthropic-api-key
+```
+
 ## Notification webhooks
 
 Store the webhook URL in the `gitSecretRef` secret under key `webhookUrl`:

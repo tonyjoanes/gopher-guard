@@ -12,7 +12,6 @@ package github
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -146,13 +145,7 @@ func (c *GitHubPRClient) findDeploymentFile(
 		if contentErr != nil {
 			return "", nil, "", fmt.Errorf("getting content of %s: %w", path, contentErr)
 		}
-		decoded, err := base64.StdEncoding.DecodeString(
-			strings.ReplaceAll(rawContent, "\n", ""),
-		)
-		if err != nil {
-			return "", nil, "", fmt.Errorf("decoding %s: %w", path, err)
-		}
-		return path, decoded, fc.GetSHA(), nil
+		return path, []byte(rawContent), fc.GetSHA(), nil
 	}
 	return "", nil, "", fmt.Errorf(
 		"deployment manifest for %q not found at any conventional path in %s/%s",

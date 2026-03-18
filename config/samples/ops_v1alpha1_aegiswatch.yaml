@@ -14,7 +14,7 @@ apiVersion: ops.gopherguard.dev/v1alpha1
 kind: AegisWatch
 metadata:
   name: jokeservice-watcher
-  namespace: gopherguard-system
+  namespace: gopher-guard-system
   labels:
     app.kubernetes.io/name: gopher-guard
     app.kubernetes.io/managed-by: kustomize
@@ -24,19 +24,18 @@ spec:
     name: jokeservice
     namespace: demo
 
-  # LLM settings — uses Groq (free, fast).
-  # Switch to llmProvider: ollama for fully offline operation.
-  llmProvider: groq
-  llmModel: llama3-70b-8192
-  llmSecretRef: groq-api-key
+  # LLM settings — uses Anthropic (Claude).
+  llmProvider: anthropic
+  llmModel: claude-haiku-4-5-20251001
+  llmSecretRef: anthropic-api-key
 
   # GitHub repo where GopherGuard opens healing PRs.
   # TODO: replace with your fork.
   gitRepo: tonyjoanes/gopher-guard
   gitSecretRef: github-token
 
-  # safeMode: true  ← uncomment to disable auto-PR (log-only mode).
+  # safeMode: false  ← GopherGuard will open a real GitHub PR with the YAML patch.
   safeMode: false
 
   # Alert after 3 container restarts.
-  restartThreshold: 3
+  restartThreshold: 1

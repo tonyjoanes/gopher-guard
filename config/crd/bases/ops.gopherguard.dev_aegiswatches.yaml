@@ -78,6 +78,7 @@ spec:
                 - groq
                 - ollama
                 - openai
+                - anthropic
                 type: string
               llmSecretRef:
                 description: |-

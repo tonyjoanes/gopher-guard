@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tonyjoanes/gopher-guard/internal/observability"
@@ -117,8 +118,24 @@ func (g *GroqClient) diagnoseOnce(ctx context.Context, obs *observability.Observ
 	return parseDiagnosis(apiResp.Choices[0].Message.Content)
 }
 
+// stripMarkdownFences removes ```json ... ``` or ``` ... ``` wrappers that
+// some LLMs add around JSON responses despite being asked for raw JSON.
+func stripMarkdownFences(s string) string {
+	s = strings.TrimSpace(s)
+	for _, prefix := range []string{"```json", "```"} {
+		if strings.HasPrefix(s, prefix) {
+			s = strings.TrimPrefix(s, prefix)
+			s = strings.TrimSuffix(s, "```")
+			return strings.TrimSpace(s)
+		}
+	}
+	return s
+}
+
 // parseDiagnosis decodes the LLM JSON content into a Diagnosis struct.
+// It strips markdown code fences (```json ... ```) that some models add.
 func parseDiagnosis(content string) (*Diagnosis, error) {
+	content = stripMarkdownFences(content)
 	var d Diagnosis
 	if err := json.Unmarshal([]byte(content), &d); err != nil {
 		return nil, fmt.Errorf("parsing LLM JSON response: %w\ncontent: %s", err, content)

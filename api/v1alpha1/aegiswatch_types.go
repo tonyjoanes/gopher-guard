@@ -21,13 +21,14 @@ import (
 )
 
 // LLMProvider enumerates the supported LLM backends.
-// +kubebuilder:validation:Enum=groq;ollama;openai
+// +kubebuilder:validation:Enum=groq;ollama;openai;anthropic
 type LLMProvider string
 
 const (
-	LLMProviderGroq   LLMProvider = "groq"
-	LLMProviderOllama LLMProvider = "ollama"
-	LLMProviderOpenAI LLMProvider = "openai"
+	LLMProviderGroq      LLMProvider = "groq"
+	LLMProviderOllama    LLMProvider = "ollama"
+	LLMProviderOpenAI    LLMProvider = "openai"
+	LLMProviderAnthropic LLMProvider = "anthropic"
 )
 
 // AegisWatchPhase represents the current state of healing activity.

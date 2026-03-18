@@ -12,8 +12,8 @@ import (
 
 // NewFromSpec builds the appropriate LLMClient for the given AegisWatch spec.
 //
-// For Groq and OpenAI: reads the API key from the Kubernetes Secret named
-// by spec.llmSecretRef (key: "apiKey") in the same namespace as the CR.
+// For Groq, OpenAI, and Anthropic: reads the API key from the Kubernetes Secret
+// named by spec.llmSecretRef (key: "apiKey") in the same namespace as the CR.
 //
 // For Ollama: no secret is required; the BaseURL defaults to localhost:11434
 // and can be overridden by setting spec.llmSecretRef to a secret that contains
@@ -39,6 +39,13 @@ func NewFromSpec(
 		// Groq just uses a different base URL (handled inside GroqClient).
 		return NewGroqClient(model, apiKey), nil
 
+	case opsv1alpha1.LLMProviderAnthropic:
+		apiKey, err := ggk8s.ReadSecretKey(ctx, c, aw.Namespace, spec.LLMSecretRef, "apiKey")
+		if err != nil {
+			return nil, fmt.Errorf("reading LLM API key secret %q: %w", spec.LLMSecretRef, err)
+		}
+		return NewAnthropicClient(model, apiKey), nil
+
 	case opsv1alpha1.LLMProviderOllama:
 		baseURL := ""
 		// Optional: allow overriding the Ollama URL via a secret key "baseUrl".
@@ -52,7 +59,7 @@ func NewFromSpec(
 		return NewOllamaClient(model, baseURL), nil
 
 	default:
-		return nil, fmt.Errorf("unsupported llmProvider %q — must be one of: groq, ollama, openai", spec.LLMProvider)
+		return nil, fmt.Errorf("unsupported llmProvider %q — must be one of: groq, ollama, openai, anthropic", spec.LLMProvider)
 	}
 }
 
@@ -65,6 +72,8 @@ func defaultModelFor(provider opsv1alpha1.LLMProvider) string {
 		return "gpt-4o-mini"
 	case opsv1alpha1.LLMProviderOllama:
 		return "llama3"
+	case opsv1alpha1.LLMProviderAnthropic:
+		return "claude-haiku-4-5-20251001"
 	default:
 		return "llama3-70b-8192"
 	}
